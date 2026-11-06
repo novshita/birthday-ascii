@@ -1,0 +1,17 @@
+:root { --night: #0b0919; --ivory: #f3ead3; --amber: #ffb347; --sky: #8fc7ff; }
+html, body { margin: 0; height: 100%; background: var(--night); overflow: hidden; }
+/* The picture fills the browser window; any leftover edge stays the same night colour. */
+canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; display: block;
+  object-fit: contain; background: var(--night); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+button {
+  position: fixed; left: 50%; bottom: max(1.5rem, 4vh); transform: translateX(-50%);
+  padding: 0.75rem 1.5rem; font: 1rem ui-monospace, Menlo, Consolas, monospace; cursor: pointer;
+  color: var(--ivory); background: rgba(11, 9, 25, 0.78); border: 1px solid var(--amber); border-radius: 0.5rem;
+  box-shadow: 0 0 18px rgba(255, 179, 71, 0.35); animation: rise 0.6s ease-out both;
+}
+button[hidden] { display: none; }
+button:hover { background: rgba(255, 179, 71, 0.18); }
+:focus-visible { outline: 3px solid var(--sky); outline-offset: 3px; }
+@keyframes rise { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@media (prefers-reduced-motion: reduce) { button { animation: none; } }
