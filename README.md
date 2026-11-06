@@ -1,11 +1,13 @@
 # Birthday in ASCII
 
-A small, private birthday page drawn as glowing, coloured ASCII art that fills the browser window. It plays four scenes in order:
+A small, private birthday page drawn as glowing, coloured ASCII art that fills the browser window. It plays these scenes in order:
 
-1. **Countdown** 3, 2, 1, then a curtain of hanging letters and butterfly charms. Sweep the cursor (or a finger) through it to part it, and your age appears with fireworks and confetti. Click once to turn on the chimes.
-2. **Cake** with flickering candles. Press the button to blow them out
-3. **A letter** to yourself, typed out beside a floating envelope
-4. **A bouquet** that grows in, with an affirmation typed beside it for each flower
+1. **Countdown** 3, 2, 1 with the digits from `art/numbers.txt`.
+2. **Butterfly curtain** (`art/curtain.jpg`): sweep the cursor, or scroll, to make it swing and part. Then the 22 with fireworks and confetti.
+3. **Fairy** (`art/fairy.txt`) appears from nowhere, waves her wand and writes "Happy Birthday" (`art/hbd.txt`) in the air. It fades and flowers (`art/flower_animation.txt`) grow in from both sides, one from above and one from below on each side.
+4. **Cake** with flickering candles. Scroll (or swipe, or press the down arrow) to blow them out
+5. **A letter** to yourself, typed out beside a floating envelope. Scroll to read faster
+6. **A bouquet** that grows in, with an affirmation typed beside it for each flower
 
 Plain HTML, CSS and JavaScript. No install, no build step, no dependencies.
 
@@ -53,7 +55,7 @@ The background cut-out in `tools/cutout.py` is tuned for these three photos. A n
 
 ## Debugging a scene
 
-Add query parameters to jump to a scene and a time: `index.html?scene=3&t=18` (scenes are 0 to 3). For the cake add `&blown` to start with the candles out.
+Add query parameters to jump to a scene and a time: `index.html?scene=6&t=18` (scenes are 0 countdown, 1 butterfly curtain, 2 the 22 and party, 3 fairy and flowers, 4 cake, 5 letter, 6 garden). For the cake add `&blown` to start with the candles out.
 
 ## Share or host
 

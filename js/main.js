@@ -293,89 +293,61 @@
     });
   }
 
-  // ---- butterfly-charm curtain: strands of glowing beads and butterflies that drop in, then part like a curtain
-  const BEADS = [[1, 0.75, 0.4], [0.5, 0.85, 1], [1, 0.6, 0.8], [0.75, 0.65, 1], [0.5, 1, 0.75], [1, 0.55, 0.35]];
-  const BF_OPEN = [" \\\\ | // ", "<@@\\|/@@>", " <@/|\\@> "];     // wings spread
-  const BF_SHUT = ["  \\ | /  ", "  (@|@)  ", "   \\|/   "];       // wings up
   const ease2 = (x) => { x = clamp(x); return x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2; };
 
-  // ---- the curtain: hanging chains of letters, each pinned at the top and simulated with Verlet physics (the same idea as
-  // the Temple of Heaven curtain). The pointer pushes nearby letters, so they swing; every column plays a chime note.
-  const PHYS = { strength: 0.72, reach: 4.2, friction: 0.965, gravity: 0.02, iters: 8 };   // distances are in rows (1 row ~ 14px)
-  const LETTERS = ("HAPPYBIRTHDAY" + String(C.name || "").toUpperCase().replace(/[^A-Z]/g, "") + String(C.age)).split("");
-  let chains = [], chainKey = "", sweptPx = 0, pointer = { x: 0, y: 0, has: false };
-
+  // ---- the curtain: art/curtain.txt is a pair of drapes made of characters. It hangs closed, sways on its own, ripples where the
+  // pointer sweeps through it (every column plays a chime) and, when opened, gathers into folds at both sides.
+  const CUR = window.CURTAIN, DR = CUR.rows, DC = CUR.cols;
+  const bin = (b64) => Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+  const DENS = bin(CUR.a), DRGB = bin(CUR.rgb);                  // per cell: how much strand/bead/butterfly, and its colour
+  // how much strand there is in each column of the picture: used to cut the two halves along a gap, never through a butterfly
+  const COLD = Float32Array.from({ length: DC }, (_, x) => { let a = 0; for (let y = 0; y < DR; y++) a += DENS[y * DC + x]; return a / 255; });
+  const srcCol = (X, sc, base) => { let sx = X / sc + base; const tile = Math.floor(sx / DC); sx -= tile * DC; return (tile & 1) ? DC - sx : sx; };
+  const emptiest = (lo, hi, sc, base, step) => {                // the position between lo and hi whose picture column is the emptiest
+    let best = lo, bv = 1e9;
+    for (let X = lo; X <= hi; X += step) { const x = clamp(Math.floor(srcCol(X, sc, base)), 1, DC - 2), v = COLD[x - 1] + 2 * COLD[x] + COLD[x + 1]; if (v < bv) { bv = v; best = X; } }
+    return best;
+  };
+  const emptyStart = (sc) => {                                  // start the picture at an empty column, so the outer edge never slices a butterfly
+    let best = 0, bv = 1e9; for (let x = 1; x < 60; x++) { const v = COLD[x - 1] + 2 * COLD[x] + COLD[x + 1]; if (v < bv) { bv = v; best = x; } } return best;
+  };
+  const KCHIME = 14, reach = () => ROWS * 0.12;       // how far the pointer's push reaches, in columns
+  let off = new Float32Array(0), vel = new Float32Array(0), heat = new Float32Array(0), voice = [], curKey = "", sweptPx = 0, pointer = { has: false };
   function buildCurtain() {                                    // rebuilt whenever the grid size changes
-    const K = Math.max(8, Math.floor(COLS / 6.5)), total = COLS * ASPECT;
-    chainKey = COLS + "x" + ROWS;
-    chains = Array.from({ length: K }, (_, k) => {
-      const len = Math.round(ROWS * (0.62 + 0.2 * rnd(k, 42))), n = len + 1;
-      return { k, K, n, ax: total * (0.04 + 0.92 * (k + 0.5) / K), len, stagger: rnd(k, 43) * 0.35, col: BEADS[k % BEADS.length],
-        off: Math.floor(rnd(k, 47) * LETTERS.length), bf: k % 3 === 1 ? 8 + Math.floor(rnd(k, 48) * (len - 18)) : -1, ph: rnd(k, 46) * TAU,
-        x: new Float32Array(n), y: new Float32Array(n), px: new Float32Array(n), py: new Float32Array(n), heat: new Float32Array(n),
-        cool: 0, placed: false };
-    });
+    curKey = COLS + "x" + ROWS; off = new Float32Array(COLS); vel = new Float32Array(COLS); heat = new Float32Array(COLS);
+    voice = Array.from({ length: KCHIME }, (_, k) => ({ k, K: KCHIME, cool: 0 }));
   }
-  function anchors(ch, drop, open) {                           // where this chain hangs from: it drops in from above, then slides to the side
-    const total = COLS * ASPECT, mid = total / 2;
-    const e = ease2((open - 0.3 * (1 - Math.abs(ch.ax - mid) / mid)) / 0.7);
-    const x = ch.ax < mid ? ch.ax * (1 - 0.9 * e) : total - (total - ch.ax) * (1 - 0.9 * e);
-    return [x, -(1 - easeOut(clamp((drop - ch.stagger) / 0.65))) * (ch.len + 3)];
-  }
-  function stepChain(ch, ax, ay, steps) {
-    if (!ch.placed) {                                          // first time: just hang straight below the anchor
-      for (let i = 0; i < ch.n; i++) { ch.x[i] = ch.px[i] = ax; ch.y[i] = ch.py[i] = ay + i; }
-      ch.placed = true; return;
+  function pushCurtain(col, dCols, speedPx) {                  // the pointer drags the cloth sideways near column col
+    let touched = false, best = 0;
+    const REACH = reach();
+    for (let c = Math.max(0, Math.floor(col - REACH)); c <= Math.min(COLS - 1, Math.ceil(col + REACH)); c++) {
+      const fall = 1 - Math.abs(c - col) / REACH; if (fall <= 0) continue;
+      vel[c] += clamp(dCols, -6, 6) * 0.22 * fall; heat[c] = Math.min(1, heat[c] + fall * 0.7); best = Math.max(best, speedPx * fall); touched = true;
     }
-    const { x, y, px, py, n } = ch, fr = PHYS.friction;
-    for (let s = 0; s < steps; s++) {
-      for (let i = 1; i < n; i++) {
-        const vx = (x[i] - px[i]) * fr, vy = (y[i] - py[i]) * fr;
-        px[i] = x[i]; py[i] = y[i]; x[i] += vx; y[i] += vy + PHYS.gravity;
+    if (touched) { sweptPx += speedPx; if (best >= 1.1) chime(voice[clamp(Math.floor(col / COLS * KCHIME), 0, KCHIME - 1)], best); }
+  }
+  function stepCloth() {                                       // neighbours pull each other: a push becomes a travelling ripple
+    for (let s = 0; s < 2; s++) {
+      for (let c = 0; c < COLS; c++) {
+        const l = off[Math.max(0, c - 1)], r = off[Math.min(COLS - 1, c + 1)];
+        vel[c] = (vel[c] + ((l + r) / 2 - off[c]) * 0.3 - off[c] * 0.012) * 0.965;
       }
-      for (let it = 0; it < PHYS.iters; it++) {
-        x[0] = px[0] = ax; y[0] = py[0] = ay;
-        for (let i = 0; i < n - 1; i++) {
-          const dx = x[i + 1] - x[i], dy = y[i + 1] - y[i], d = Math.hypot(dx, dy);
-          if (d < 1e-6) continue;
-          const f = (d - 1) / d;
-          if (i === 0) { x[1] -= dx * f; y[1] -= dy * f; }     // the anchor never moves
-          else { x[i] += dx * f * 0.5; y[i] += dy * f * 0.5; x[i + 1] -= dx * f * 0.5; y[i + 1] -= dy * f * 0.5; }
-        }
-      }
+      for (let c = 0; c < COLS; c++) off[c] = clamp(off[c] + vel[c], -12, 12);
     }
   }
-  // push every letter near the pointer's previous spot along the pointer's movement (linear falloff), like the reference
-  function pushCurtain(fromX, fromY, dX, dY, speedPx) {
-    let touched = false;
-    for (const ch of chains) {
-      let best = 0;
-      for (let i = 1; i < ch.n; i++) {
-        const d = Math.hypot(ch.x[i] - fromX, ch.y[i] - fromY);
-        if (d >= PHYS.reach) continue;
-        const fall = 1 - d / PHYS.reach;
-        ch.x[i] += dX * PHYS.strength * fall; ch.y[i] += dY * PHYS.strength * fall;
-        ch.heat[i] = Math.min(1, ch.heat[i] + fall * 0.8);
-        best = Math.max(best, speedPx * fall); touched = true;
-      }
-      if (best >= 1.1) chime(ch, best);
-    }
-    if (touched) sweptPx += speedPx;
-  }
-  const toRows = (cx, cy) => {                                  // screen pixels -> physics units (x in rows, y in rows)
+  const toRows = (cx, cy) => {                                  // screen pixels -> cell column and row
     const k = Math.min(innerWidth / W, innerHeight / H);
-    return [((cx - (innerWidth - W * k) / 2) / (CW * k)) * ASPECT, (cy - (innerHeight - H * k) / 2) / (CH * k)];
+    return [(cx - (innerWidth - W * k) / 2) / (CW * k), (cy - (innerHeight - H * k) / 2) / (CH * k)];
   };
   let curtainLive = false;                                      // only the countdown scene reacts to the pointer
   addEventListener("pointermove", (ev) => {
     const [x, y] = toRows(ev.clientX, ev.clientY);
     if (curtainLive && pointer.has) {
-      const dxp = ev.clientX - pointer.cx, dyp = ev.clientY - pointer.cy, sp = Math.hypot(dxp, dyp);
-      if (sp >= 0.01 && sp <= 80) pushCurtain(pointer.x, pointer.y, x - pointer.x, y - pointer.y, sp);
+      const sp = Math.hypot(ev.clientX - pointer.cx, ev.clientY - pointer.cy);
+      if (sp >= 0.01 && sp <= 120) pushCurtain(x, x - pointer.x, sp);
     }
     pointer = { x, y, cx: ev.clientX, cy: ev.clientY, has: true };
   });
-  addEventListener("pointerleave", () => { pointer.has = false; });
   document.addEventListener("pointerleave", () => { pointer.has = false; });
 
   // ---- chimes: first click or tap switches the sound on (browsers require a gesture). One note per column, on a 10-note scale.
@@ -409,23 +381,32 @@
     });
   }
 
-  function drawCurtain(t) {
-    for (const ch of chains) {
-      const { x, y, heat, n } = ch;
-      for (let i = 0; i < n; i++) {
-        const c = Math.round(x[i] / ASPECT), r = Math.round(y[i]);
-        if (r < 0 || r >= ROWS || c < 0 || c >= COLS) { heat[i] *= 0.9; continue; }
-        const h = heat[i]; heat[i] *= 0.93;
-        const pat = 0.5 + 0.5 * Math.sin(ch.k * 1.7 + i * 0.9), bead = i % 9 === 8 || i === n - 1;
-        glyph(r, c, bead ? "o" : LETTERS[(ch.off + i) % LETTERS.length], clamp(0.45 + 0.25 * pat + 0.5 * h + (bead ? 0.15 : 0)), lerp3(ch.col, [1, 1, 0.95], h * 0.7));
-      }
-      if (ch.bf >= 0 && ch.bf < n) {                           // a butterfly charm hanging from this chain
-        const c0 = Math.round(x[ch.bf] / ASPECT), r0 = Math.round(y[ch.bf]), hot = heat[ch.bf] > 0.25;
-        const flap = !reduce && Math.sin(t * (hot ? 12 : 5) + ch.ph) > 0.2, spr = flap ? BF_SHUT : BF_OPEN;
-        const col = lerp3(ch.col, BEADS[(ch.k + 2) % BEADS.length], 0.5 + 0.5 * Math.sin(t * 1.5 + ch.ph));
-        spr.forEach((row, dr) => [...row].forEach((chr, dc) => {
-          if (chr !== " ") glyph(r0 + dr - 1, c0 + dc - 4, chr, chr === "|" ? 0.55 : 0.9, chr === "|" ? [1, 0.85, 0.5] : col);
-        }));
+  function drawCurtain(t, drop, open) {
+    // the picture keeps its own proportions (so butterflies stay butterflies) and repeats across the screen; opening slides both halves out
+    const half = COLS / 2, sc = Math.min((ROWS / DR) * 0.95, COLS / 2 / (DC * 0.5)), base = emptyStart(sc), cut = emptiest(half * 0.9, half, sc, base, 0.5), shift = ease2(open) * (cut + 2), rows = Math.min(ROWS, Math.round(ROWS * easeOut(drop)));
+    const sway = reduce ? 0 : 1;
+    for (let c = 0; c < COLS; c++) heat[c] *= 0.94;
+    for (let side = 0; side < 2; side++) {
+      for (let k = 0; k < Math.ceil(half) + 14; k++) {            // k = distance from this side's outer edge, in cells
+        const c = side ? COLS - 1 - k : k; if (c < 0 || c >= COLS) continue;
+        for (let r = 0; r < rows; r++) {
+          const lean = (0.25 + 0.75 * r / ROWS), wob = sway * 1.3 * Math.sin(r * 0.07 + t * 0.9 + k * 0.045) * lean;
+          const X = k + shift + (side ? 1 : -1) * (off[c] * lean + wob);
+          if (X < 0 || X > cut) continue;
+          // smooth sample of the picture at this spot (the strands are thin, so we blend rather than skip characters)
+          const sx = srcCol(X, sc, base);                         // every other copy is mirrored: no seams
+          const fx0 = sx - 0.5, fy0 = r / sc - 0.5, ix = Math.floor(fx0), iy = Math.floor(fy0), tx = fx0 - ix, ty = fy0 - iy;
+          let dsum = 0, cr = 0, cg = 0, cb = 0;
+          for (let q = 0; q < 4; q++) {
+            const qx = ix + (q & 1), sy = iy + (q >> 1); if (sy < 0 || sy >= DR || qx < 0 || qx >= DC) continue;
+            const wgt = ((q & 1) ? tx : 1 - tx) * ((q >> 1) ? ty : 1 - ty), dd = DENS[sy * DC + qx] / 255 * wgt, o = (sy * DC + qx) * 3;
+            dsum += dd; cr += DRGB[o] * dd; cg += DRGB[o + 1] * dd; cb += DRGB[o + 2] * dd;
+          }
+          if (dsum < 0.12) continue;
+          const h = heat[c], tw = 0.85 + 0.15 * Math.sin(t * 3 + r * 0.9 + c * 0.7) * FLICK;       // beads twinkle
+          const l = clamp((0.3 + 1.1 * dsum + 0.35 * h) * tw), inv = 1 / (255 * dsum);
+          setT(r * COLS + c, l, lerp3([cr * inv, cg * inv, cb * inv], [1, 1, 0.95], 0.6 * h));
+        }
       }
     }
   }
@@ -433,68 +414,237 @@
     if (dt < 0 || dt > 1.9) return;
     const life = 1 - smoothstep(1.1, 1.9, dt), cols = [[1, 0.8, 0.4], [1, 0.5, 0.7], [0.55, 0.85, 1], [0.8, 0.65, 1], [0.6, 1, 0.7]];
     if (dt < 0.12) for (let k = 0; k < 6; k++) glyph(Math.round(cy), Math.round(cx) + k - 3, "*", 1, [1, 1, 0.95]);   // flash
+    const FS = Math.max(1, ROWS / 57);
     for (let k = 0; k < 44; k++) {
-      const ang = (k / 44) * TAU + rnd(seed, 3) * 6, sp = 14 + rnd(k, seed) * 12;
+      const ang = (k / 44) * TAU + rnd(seed, 3) * 6, sp = (14 + rnd(k, seed) * 12) * FS;
       for (let q = 0; q < 3; q++) {                            // each spark leaves a short trail
         const d = Math.max(0, dt - q * 0.05), dist = sp * d * (1 - 0.3 * d);
-        glyph(Math.round(cy + Math.sin(ang) * dist + 9 * d * d), Math.round(cx + Math.cos(ang) * dist * 2),
+        glyph(Math.round(cy + Math.sin(ang) * dist + 9 * FS * d * d), Math.round(cx + Math.cos(ang) * dist * 2),
           q ? "." : "*+"[k % 2], (q ? 0.45 : 0.95) * life, cols[(hue + (k % 3)) % cols.length]);
       }
     }
   }
   const BURSTS = [[1.5, 0.22, 0.3], [2.1, 0.78, 0.26], [2.7, 0.5, 0.18], [3.5, 0.32, 0.42], [4.1, 0.7, 0.4], [4.9, 0.5, 0.3], [5.7, 0.18, 0.25], [6.1, 0.84, 0.3], [6.8, 0.5, 0.2]];
 
+  // scene 1: the countdown. Scene 2: the curtain of butterflies (drawn on the finer grid, so the butterflies are clear) opens.
+  // Scene 3: behind it, the big number and the party.
+  // ---- sprites: the ASCII pictures from art/*.txt (js/sprites.js), moved, rotated and coloured by the page
+  const SP = {};
+  for (const k in window.SPR) { const q = window.SPR[k]; SP[k] = { cols: q.cols, rows: q.rows, v: bin(q.v), tip: q.tip }; }
+  const KX = 0.54;                                         // an art character is 0.54 as wide as it is tall
+  function spriteFrame(sp, o) {
+    const sy = o.h / sp.rows, pxa = (o.px === undefined ? 0.5 : o.px) * sp.cols, pya = (o.py === undefined ? 0.5 : o.py) * sp.rows;
+    return { sy, pxa, pya, P0x: o.x + (pxa - sp.cols / 2) * sy * KX / ASPECT, P0y: o.y + (pya - sp.rows / 2) * sy, cs: Math.cos(o.rot || 0), sn: Math.sin(o.rot || 0) };
+  }
+  function spriteTip(sp, o) {                              // where a point of the picture (its wand tip) is on screen: [col, row]
+    const F = spriteFrame(sp, o); let ax = sp.tip[0] * sp.cols, ay = sp.tip[1] * sp.rows;
+    if (o.flipX) ax = sp.cols - ax; if (o.flipY) ay = sp.rows - ay;
+    const x = (ax - F.pxa) * F.sy * KX, y = (ay - F.pya) * F.sy;
+    return [F.P0x + (x * F.cs - y * F.sn) / ASPECT, F.P0y + x * F.sn + y * F.cs];
+  }
+  // o: x, y (centre, in cells), h (height in rows), rot, px/py (pivot, 0..1), flipX/flipY, alpha, lo/gain (brightness to opacity),
+  //    color(u, v, d) -> rgb, show(u, v) -> 0..1
+  function sprite(sp, o) {
+    const F = spriteFrame(sp, o), { cols, rows, v } = sp, lo = o.lo === undefined ? 0.25 : o.lo, gain = o.gain === undefined ? 1.8 : o.gain;
+    const R = Math.hypot(cols * F.sy * KX, rows * F.sy);
+    const c0 = Math.max(0, Math.floor(F.P0x - R / ASPECT)), c1 = Math.min(COLS - 1, Math.ceil(F.P0x + R / ASPECT));
+    const r0 = Math.max(0, Math.floor(F.P0y - R)), r1 = Math.min(ROWS - 1, Math.ceil(F.P0y + R));
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+      const dx = (c - F.P0x) * ASPECT, dy = r - F.P0y;
+      let ax = F.pxa + (dx * F.cs + dy * F.sn) / (F.sy * KX), ay = F.pya + (-dx * F.sn + dy * F.cs) / F.sy;
+      if (o.flipX) ax = cols - ax; if (o.flipY) ay = rows - ay;
+      const fx0 = ax - 0.5, fy0 = ay - 0.5, ix = Math.floor(fx0), iy = Math.floor(fy0), tx = fx0 - ix, ty = fy0 - iy;
+      if (ix < -1 || iy < -1 || ix >= cols || iy >= rows) continue;
+      let d = 0;
+      for (let q = 0; q < 4; q++) {
+        const qx = ix + (q & 1), qy = iy + (q >> 1); if (qx < 0 || qy < 0 || qx >= cols || qy >= rows) continue;
+        d += v[qy * cols + qx] * ((q & 1) ? tx : 1 - tx) * ((q >> 1) ? ty : 1 - ty);
+      }
+      d /= 255; let a = clamp((d - lo) * gain); if (a < 0.03) continue;
+      const u = ax / cols, w = ay / rows;
+      if (o.show) { a *= o.show(u, w); if (a < 0.03) continue; }
+      setT(r * COLS + c, clamp(a * (o.alpha === undefined ? 1 : o.alpha)), o.color(u, w, d));
+    }
+  }
+  const dust = (r, c, l, col, k) => glyph(Math.round(r), Math.round(c), "*+.'`"[k % 5], l, col);   // one little sparkle
+  const COOL = (u, v) => lerp3([0.55, 0.85, 1], [0.8, 0.62, 1], v);
+
+  // scene 1: the countdown, with the digits from art/numbers.txt
   const countdown = {
-    grid: NATIVE, openAt: null, swept0: 0,
-    start() { this.openAt = null; chains = []; chainKey = ""; sweptPx = 0; curtainLive = true; say("Counting down to " + C.age + ". Then a curtain of letters: sweep the pointer through it to open it."); },
+    grid: HI,
+    start() { curtainLive = false; say("Counting down to " + C.age + "."); },
     frame(t) {
       backdrop(t);
-      const n = C.countdownFrom, ready = n + 1.3;
-      if (chainKey !== COLS + "x" + ROWS) buildCurtain();
+      const n = C.countdownFrom;
       if (t < n) {
-        const step = Math.floor(t), st = t - step;
-        drawNumber(String(n - step), 32, 1 + 0.35 * (1 - easeOut(st * 3)), 1 - smoothstep(0.78, 1, st), t, false);
-        textC(rowAt(58), "Counting down to " + C.age, 0.7, [0.7, 0.75, 1]);
+        const step = Math.floor(t), st = t - step, k = n - step;
+        if (SP["d" + k]) sprite(SP["d" + k], { x: COLS / 2, y: ROWS * 0.47, h: ROWS * 0.5 * (1 + 0.3 * (1 - easeOut(st * 3))), alpha: 1 - smoothstep(0.78, 1, st), lo: 0.2, gain: 1.7,
+          color: (u, v, d) => lerp3(COOL(u, v), [1, 1, 1], clamp(d - 0.6) * 1.2) });
+        setCap("Counting down to " + C.age);
       }
-      // the curtain opens when it has been swept enough, or after a few seconds on its own
-      if (this.openAt === null && t > ready) {
-        if (Q.has("open")) this.openAt = n + Number(Q.get("open"));
-        else if (sweptPx > 700 || t > ready + 9) this.openAt = t;
+      if (t > n + 0.1) return "next";
+    },
+  };
+  // scene 2: the big number and the party
+  const party = {
+    grid: HI,
+    start() { curtainLive = false; say("Hurray! Happy birthday, " + C.name + ". You are " + C.age + "."); },
+    frame(t) {
+      backdrop(t);
+      const digits = String(C.age).split("").filter((ch) => SP["d" + ch]), h = ROWS * 0.5 * (1 + 0.45 * (1 - easeOut(t * 2.2)));
+      const widths = digits.map((ch) => SP["d" + ch].cols * (h / SP["d" + ch].rows) * KX / ASPECT), gap = h * 0.25;
+      let x = COLS / 2 - (widths.reduce((a, b) => a + b, 0) + gap * (digits.length - 1)) / 2;
+      digits.forEach((ch, i) => {
+        sprite(SP["d" + ch], { x: x + widths[i] / 2, y: ROWS * 0.47, h, alpha: smoothstep(0, 0.35, t), lo: 0.2, gain: 1.7,
+          color: (u, v, d) => lerp3(lerp3(GOLD, ROSE, v + 0.2 * Math.sin(u * 5 - t * 3 * FLICK)), [1, 1, 1], clamp(d - 0.6) * 1.2) });
+        x += widths[i] + gap;
+      });
+      if (!reduce) {
+        confetti(t, 0, 32, 100, 3);
+        for (const [bt, bx, by] of BURSTS) firework(t - bt, bx * COLS, by * ROWS, Math.round(bt * 10), Math.round(bx * 10));
       }
-      if (Q.has("sweep") && this.openAt === null && t > ready && t < ready + 3) {   // debug: simulate a pointer sweeping across
-        const px = (COLS * ASPECT) * (0.1 + 0.8 * ((t - ready) / 1.6 % 1)), py = ROWS * 0.4, last = this.simX;
-        if (last !== undefined) pushCurtain(last, py, px - last, 0.2, Math.abs(px - last) * CH);
-        this.simX = px;
-      }
-      const ot = this.openAt === null ? -1 : t - this.openAt;
-      if (ot > 0.8) {                                          // behind the curtain: the big number and the party
-        const at = ot - 0.8;
-        drawNumber(String(C.age), 32, 1 + 0.5 * (1 - easeOut(at * 2.2)), smoothstep(0, 0.35, at), t, true);
-        if (!reduce) {
-          confetti(at, 0, 32, 100, 3);
-          for (const [bt, bx, by] of BURSTS) firework(at - bt, bx * COLS, by * ROWS, Math.round(bt * 10), Math.round(bx * 10));
-        }
-        setTitle(at > 0.5 ? "Hurray! Happy birthday, " + C.name : "");
-        if (at > 8.5) { curtainLive = false; return "next"; }
-      }
-      const drop = clamp((t - (n - 0.5)) / 1.3), open = this.openAt === null ? 0 : clamp(ot / 2.8);
-      if (drop > 0) {
-        for (const ch of chains) { const [ax, ay] = anchors(ch, drop, open); stepChain(ch, ax, ay, 2); }
-        drawCurtain(t);
-      }
-      setCap(drop >= 1 && this.openAt === null ? "Sweep your cursor or finger through the curtain  -  click once for chimes" : "");
+      setTitle(t > 0.5 ? "Hurray! Happy birthday, " + C.name : "");
+      if (t > 8.5) return "next";
     },
   };
 
+  // Tinker Bell's colours, by where on the picture a cell is: blonde hair, peach skin, a green dress, pale blue wings, gold sparkles
+  function tinkerbell(u, v, d, t) {
+    const x = u * 96, y = v * 71, box = (x0, x1, y0, y1) => smoothstep(x0 - 2, x0, x) * (1 - smoothstep(x1, x1 + 2, x)) * smoothstep(y0 - 2, y0, y) * (1 - smoothstep(y1, y1 + 2, y));
+    const dress = Math.max(box(46, 62, 21, 34), box(36, 61, 34, 50));
+    const wing = (1 - dress) * Math.max((1 - smoothstep(44, 48, x)) * (1 - smoothstep(32, 36, y)), (1 - smoothstep(34, 38, x)) * (1 - smoothstep(40, 44, y)));
+    const e = ((x - 60) / 13) ** 2 + ((y - 11) / 7.5) ** 2, hair = 1 - smoothstep(0.7, 1.2, e);
+    const gold = smoothstep(76, 82, x) + (1 - smoothstep(18, 26, x)) * smoothstep(10, 14, y);
+    let col = [1, 0.8, 0.68];                                                              // skin
+    col = lerp3(col, [0.4, 0.92, 0.42], dress);                                            // dress: leaf green
+    col = lerp3(col, lerp3([0.5, 0.82, 1], [0.78, 0.7, 1], v + 0.15 * Math.sin(t * 2 * FLICK + u * 9)), wing);
+    col = lerp3(col, [1, 0.86, 0.38], hair);                                               // hair
+    col = lerp3(col, [1, 0.93, 0.55], clamp(gold));                                        // sparkles and the wand tip
+    const k = 0.85 + 0.4 * d;
+    return lerp3([col[0] * k, col[1] * k, col[2] * k], [1, 1, 0.95], clamp(d - 0.85) * 2);
+  }
+
+  // scene 3: a fairy appears from nowhere, waves her wand and writes "Happy Birthday" in the air; that fades, and flowers
+  // grow in from the left and right (one from above and one from below on each side). Then the cake.
+  const MG = { wave: 2.2, hbdAt: 3.4, hbdD: 2.6, hbdOut: 9.5, hbdOutD: 3, fairyOut: 12, flowers: 12.5, flowersD: 3.8, end: 19 };
+  const magic = {
+    grid: HI,
+    start() { say("A fairy appears, waves her wand and writes Happy Birthday in the air. Then flowers grow in from the sides."); },
+    frame(t) {
+      backdrop(t);
+      const wide = W / H >= 1.15, fh = ROWS * (wide ? 0.72 : 0.5);
+      const L = wide ? { fx: COLS * 0.27, fy: ROWS * 0.54, bx: COLS * 0.66, by: ROWS * 0.42, bh: Math.min(ROWS * 0.42, COLS * 0.5 / 2.16) }
+                     : { fx: COLS * 0.4, fy: ROWS * 0.7, bx: COLS * 0.5, by: ROWS * 0.27, bh: Math.min(ROWS * 0.3, COLS * 0.9 / 2.16) };
+      const fairyAt = (tt) => ({ x: L.fx + 2 * Math.sin(tt * 1.1), y: L.fy + ROWS * 0.012 * Math.sin(tt * 1.4), h: fh, px: 0.5, py: 0.55,
+        rot: 0.11 * smoothstep(MG.wave, MG.wave + 0.5, tt) * (1 - 0.7 * smoothstep(MG.hbdAt + MG.hbdD, MG.hbdAt + MG.hbdD + 1.5, tt)) * Math.sin(tt * 15 * FLICK) });
+      const fo = fairyAt(t), fairyA = (1 - smoothstep(MG.fairyOut, MG.fairyOut + 1.6, t)), appear = clamp((t - 0.2) / 1.8);
+      // 1) the fairy: sparkles gather, then she is there
+      if (fairyA > 0) {
+        sprite(SP.fairy, { ...fo, alpha: fairyA * smoothstep(0.1, 0.6, appear), lo: 0.2, gain: 1.8,
+          show: (u, v) => smoothstep(noise2(u * 3, v * 3) * 0.7, noise2(u * 3, v * 3) * 0.7 + 0.35, appear * 1.1),
+          color: (u, v, d) => tinkerbell(u, v, d, t) });
+        if (!reduce && t < 2.4) for (let k = 0; k < 70; k++) {
+          const ang = rnd(k, 31) * TAU, R0 = (0.45 + 0.5 * rnd(k, 32)) * fh, e = easeOut(clamp((t - rnd(k, 33) * 0.6) / 1.6));
+          dust(fo.y + Math.sin(ang) * R0 * (1 - e), fo.x + Math.cos(ang) * R0 * (1 - e) * 1.2, 0.9 * (1 - e) * Math.min(1, t * 3), [1, 0.9, 0.6 + 0.4 * rnd(k, 34)], k);
+        }
+      }
+      // 2) sparks pour from the wand
+      if (!reduce && t > MG.wave && t < MG.hbdAt + MG.hbdD + 3) for (let k = 0; k < 130; k++) {
+        const tb = MG.wave + 0.1 + k * 0.045, age = t - tb; if (age < 0 || age > 1.5) continue;
+        const [tc, tr] = spriteTip(SP.fairy, fairyAt(tb)), a = 1 - age / 1.5;
+        dust(tr + ((rnd(k, 35) - 0.5) * 6 - 5) * age * (ROWS / 90) + 14 * age * age, tc + (rnd(k, 36) - 0.3) * 16 * age * (ROWS / 90), 0.95 * a,
+          [[1, 0.85, 0.45], [1, 0.6, 0.85], [0.6, 0.9, 1]][k % 3], k);
+      }
+      // 3) "Happy Birthday" grows out of the wand tip, hangs there, then dissolves
+      const he = easeOut(clamp((t - MG.hbdAt) / MG.hbdD)), g2 = clamp((t - MG.hbdOut) / MG.hbdOutD);
+      if (t >= MG.hbdAt && g2 < 1) {
+        const [tc, tr] = spriteTip(SP.fairy, fo), bob = reduce ? 0 : Math.sin(t * 1.3) * ROWS * 0.008;
+        sprite(SP.hbd, { x: tc + (L.bx - tc) * he, y: tr + (L.by - tr) * he + bob, h: L.bh * (0.05 + 0.95 * he), lo: 0.3, gain: 2.2,
+          alpha: smoothstep(MG.hbdAt, MG.hbdAt + 0.5, t),
+          show: (u, v) => {
+            const wipe = smoothstep(u * 0.7 - 0.05, u * 0.7 + 0.25, he * 1.0), nz = noise2(u * 3, v * 3), dis = clamp((nz - (g2 * 1.4 - 0.2)) * 6);
+            return wipe * dis;
+          },
+          color: (u, v, d) => lerp3(lerp3([1, 0.82, 0.45], [1, 0.95, 0.85], v), [1, 1, 1], 0.2 + 0.2 * Math.sin(t * 4 * FLICK + u * 20)) });
+      }
+      // 4) flowers grow in from both sides
+      const gf = clamp((t - MG.flowers) / MG.flowersD);
+      if (gf > 0) {
+        const fh2 = Math.min(ROWS * 0.55, COLS * 0.32), fw = SP.flower.cols * (fh2 / SP.flower.rows) * KX / ASPECT;
+        [[-1, 0], [-1, 1], [1, 0], [1, 1]].forEach(([side, top], i) => {       // top = 1: hangs from above
+          const g = clamp((t - MG.flowers - (top ? 0.3 : 0)) / MG.flowersD), slide = (1 - easeOut(g)) * fw * 0.6;
+          sprite(SP.flower, { x: side < 0 ? fw / 2 + 2 - slide : COLS - fw / 2 - 2 + slide, y: top ? fh2 / 2 + ROWS * 0.01 : ROWS - fh2 / 2 - ROWS * 0.01, h: fh2,
+            flipX: side > 0, flipY: !!top, rot: reduce ? 0 : 0.03 * Math.sin(t * 0.9 + i * 1.7), lo: 0.25, gain: 1.8, alpha: smoothstep(0, 0.15, g),
+            show: (u, v) => smoothstep(1.1 - g * 1.3 - 0.14, 1.1 - g * 1.3, v),
+            color: (u, v, d) => lerp3(lerp3([1, 0.55, 0.75], [0.78, 0.62, 1], v), [1, 0.95, 0.85], clamp(d - 0.55) * 1.3 + 0.12 * Math.sin(t * 3 * FLICK + u * 17 + v * 9)) });
+        });
+        if (!reduce) for (let k = 0; k < 14; k++) {                                  // petals drifting down
+          const age = (t * 0.25 + rnd(k, 37)) % 1;
+          dust(age * ROWS, (rnd(k, 38) * 0.95 + 0.025) * COLS + 6 * Math.sin(t + k), 0.7 * gf * (1 - age * 0.5), [1, 0.7, 0.85], k);
+        }
+      }
+      fireflies(t, 0.4);
+      if (t > MG.end) return "next";
+    },
+  };
+
+  const curtain = {
+    grid: HI, openAt: null, simX: undefined,
+    start() { this.openAt = null; this.simX = undefined; curKey = ""; sweptPx = 0; curtainLive = true; say("A curtain of butterflies and charms. Sweep the pointer through it, or scroll, to open it."); },
+    scroll(d) { if (this.openAt === null) sweptPx += Math.abs(d) * 0.6; },
+    frame(t) {
+      backdrop(t);
+      if (curKey !== COLS + "x" + ROWS) buildCurtain();
+      const ready = 1.4;
+      // it opens when it has been swept enough, or after a few seconds on its own
+      if (this.openAt === null && t > ready) {
+        if (Q.has("open")) this.openAt = Number(Q.get("open"));
+        else if (sweptPx > 700 || t > ready + 9) this.openAt = t;
+      }
+      if (Q.has("sweep") && this.openAt === null && t > ready && t < ready + 3) {   // debug: simulate a pointer sweeping across
+        const px = COLS * (0.1 + 0.8 * ((t - ready) / 1.6 % 1)), last = this.simX;
+        if (last !== undefined) pushCurtain(px, px - last, Math.abs(px - last) * CW);
+        this.simX = px;
+      }
+      const ot = this.openAt === null ? -1 : t - this.openAt, drop = clamp(t / 1.3), open = this.openAt === null ? 0 : clamp(ot / 2.8);
+      stepCloth(); drawCurtain(t, drop, open);
+      setCap(drop >= 1 && this.openAt === null ? "Sweep your cursor or finger through the curtain, or scroll, to open it  -  click once for chimes" : "");
+      if (ot > 3.4) { curtainLive = false; return "next"; }          // the curtain has parted: on to the number
+    },
+  };
   // ============================================================ scene 2: cake (art/cake.jpg)
   const cake = {
-    grid: HI, blowAt: null, btn: 0, btn2: 0,
-    start() { this.blowAt = Q.has("blown") ? 0 : null; this.btn = this.btn2 = 0; say("A cake with cherries and candles. Make a wish."); },
+    grid: HI, outAt: [], prog: 0, extra: 0, doneAt: null, lastT: 0, zoom: 0,
+    start() {                                              // scroll / swipe / arrow keys blow the candles out one by one
+      this.outAt = []; this.prog = Q.has("blown") ? 1 : 0; this.extra = 0; this.doneAt = null; this.lastT = 0; this.zoom = 0;
+      if (Q.has("blown")) this.outAt = PIC.cake.marks.map(() => -10);
+      if (Q.has("prog")) {                                  // debug: ?prog=0.4 starts with 40% of the way through the scroll
+        const n = PIC.cake.marks.length; this.prog = Number(Q.get("prog")); this.outAt = Array.from({ length: Math.ceil(this.prog * n - 1e-6) }, () => -10);
+      }
+      say("A cake with cherries and candles. Make a wish. Scroll, swipe or press the down arrow to blow out the candles.");
+    },
+    scroll(d) {                                            // d: scroll distance in pixels (positive = down)
+      const n = PIC.cake.marks.length;
+      if (this.outAt.length < n) {
+        this.prog = clamp(this.prog + clamp(d, -80, 80) / 1800, 0, 1);   // gentle: one notch is a fraction of one candle
+        while (this.outAt.length < Math.ceil(this.prog * n - 1e-6)) this.outAt.push(this.lastT);
+        if (this.outAt.length === n) this.doneAt = this.lastT;
+      } else if (this.lastT > this.doneAt + 1.6) {         // all out: keep scrolling to open the letter
+        this.extra = clamp(this.extra + d / 600, 0, 1);
+        if (this.extra >= 1) goto(5);
+      }
+    },
     frame(t, T) {
       backdrop(t);
-      const p = PIC.cake, marks = p.marks, f = fitPic(p, 48, 20, 1.25), w = picW(p, f), h = p.rows * f;
-      const cx = COLS / 2, top = 22;
-      const out = (k) => this.blowAt === null ? 0 : smoothstep(this.blowAt + k * 0.16, this.blowAt + k * 0.16 + 0.4, t);
+      const p = PIC.cake, marks = p.marks, f0 = fitPic(p, 48, 20, 1.25);
+      // scrolling zooms in on the candles while they go out, then back out before the letter
+      const zt = this.outAt.length < marks.length ? this.prog : 1 - this.extra;       // 0..1 target
+      this.zoom += (zt - this.zoom) * (1 - Math.exp(-4 * Math.max(0, t - this.lastT)));
+      const zf = reduce ? zt : this.zoom, f = f0 * (1 + 0.5 * zf), w = picW(p, f), h = p.rows * f;
+      const cx = COLS / 2, my = marks.reduce((a, m) => a + m[1], 0) / marks.length;
+      const top = (22 + my * p.rows * f0) * (1 - zf) + ROWS * 0.45 * zf - my * h;
+      this.lastT = t;
+      const out = (k) => k < this.outAt.length ? smoothstep(this.outAt[k], this.outAt[k] + 0.4, t) : 0;
       let alive = 0;
       for (let k = 0; k < marks.length; k++) alive += 1 - out(k);
       const flick = 0.95 + 0.05 * Math.sin(t * 11 * FLICK) * Math.sin(t * 5.3 * FLICK);
@@ -508,14 +658,14 @@
         const col = Math.round(cx + (m[0] - 0.5) * w), base = Math.round(top + m[1] * h);
         const life = (1 - out(k)) * smoothstep(0.6, 1.4, t);
         if (life > 0.02) {
-          flame(col, base, 10, t, k, life);
+          flame(col, base, 10 * (1 + 0.5 * zf), t, k, life);
           if (!reduce) for (let q = 0; q < 5; q++) {         // sparks rising from the flame
             const age = (t * 0.7 + rnd(k * 9 + q, 4)) % 1;
             glyph(Math.round(base - 11 - age * 22), Math.round(col + 5 * Math.sin(t * 1.3 + k + q * 2) * age), q % 2 ? "." : "*", 0.8 * (1 - age) * life, [1, 0.8, 0.4]);
           }
         }
-        else if (this.blowAt !== null) {                    // smoke once the flame is out
-          const age = t - (this.blowAt + k * 0.16 + 0.3), a = 1 - smoothstep(2, 3.4, age);
+        else if (k < this.outAt.length) {                   // smoke once the flame is out
+          const age = t - (this.outAt[k] + 0.3), a = 1 - smoothstep(2, 3.4, age);
           if (age > 0 && a > 0) for (let d = 0; d < Math.min(14, age * 6); d++) {
             const sc = col + Math.round(2.5 * Math.sin(d * 0.55 - t * 2) * (d / 14 + 0.25));
             glyph(base - d, sc, d % 3 === 0 ? "~" : d % 3 === 1 ? "'" : ".", 0.4 * a * (1 - d / 16), [0.7, 0.7, 0.8]);
@@ -523,15 +673,9 @@
         }
       });
       fireflies(t, smoothstep(1, 3, t) * warm);
-      setCap(alive > 0 ? "Make a wish." : "May every wish come true.");
-      if (this.blowAt === null && !this.btn && t > 2.4) {
-        this.btn = 1;
-        showBtn("Blow out the candles", () => { this.blowAt = T(); });
-      }
-      if (this.blowAt !== null && !this.btn2 && t > this.blowAt + 2.6) {
-        this.btn2 = 1;
-        showBtn("Open your letter", () => goto(2));
-      }
+      const all = this.outAt.length === marks.length;
+      setCap(t < 2.4 ? "Make a wish." : !all ? "Scroll or swipe to blow out the candles  \u2193"
+        : t > this.doneAt + 1.6 ? "May every wish come true.  Scroll on to open your letter  \u2193" : "May every wish come true.");
     },
   };
 
@@ -568,9 +712,13 @@
   const SCRAMBLE = "#@$%&8WM*+=";
 
   const letter = {
-    grid: HI, btn: 0,
-    start() { this.btn = 0; say(C.letter.join(" ")); },
-    frame(t) {
+    grid: HI, done: false, extra: 0, skip: 0,
+    start() { this.done = false; this.extra = 0; this.skip = 0; say(C.letter.join(" ") + " Scroll, swipe or press the down arrow to walk into the garden."); },
+    scroll(d) {
+      if (!this.done) { this.skip += Math.max(0, d) * 0.015; return; }            // scrolling fast-forwards the envelope and the typing
+      { this.extra = clamp(this.extra + d / 600, 0, 1); if (this.extra >= 1) goto(6); } },
+    frame(t0) {
+      const t = t0 + this.skip;
       backdrop(t);
       const wide = innerWidth >= 820, p = PIC.letter;
       const fA = fitPic(p, 28, 60, 1.4), fB = wide ? fitPic(p, 32, COLS * 0.5 + 10, 1.2) : fA * 0.85;
@@ -634,7 +782,8 @@
         }
         g.restore();
       });
-      if (done && !this.btn) { this.btn = 1; showBtn("Walk into the garden", () => goto(3)); }
+      this.done = done;
+      setCap(done ? "Scroll on to walk into the garden  \u2193" : t > 1 ? "Scroll to read faster  \u2193" : "");
     },
   };
 
@@ -750,7 +899,7 @@
   };
 
   // ============================================================ scene manager
-  const scenes = [countdown, cake, letter, garden];
+  const scenes = [countdown, curtain, party, magic, cake, letter, garden];
   let cur = Number(Q.get("scene")) || 0, t0 = performance.now() - (Number(Q.get("t")) || 0) * 1000, exiting = null;
   const sceneTime = () => (performance.now() - t0) / 1000;
   const fadeEls = [ui.cap, ui.title, ui.notes];
@@ -761,6 +910,13 @@
     btn.onclick = () => { btn.hidden = true; fn(); };
     btn.focus({ preventScroll: true });
   }
+  let touchY = null;
+  const feed = (d) => { if (!exiting && scenes[cur].scroll) scenes[cur].scroll(d); };
+  addEventListener("wheel", (e) => { feed(e.deltaMode === 1 ? e.deltaY * 30 : e.deltaY); }, { passive: true });
+  addEventListener("touchstart", (e) => { touchY = e.touches[0].clientY; }, { passive: true });
+  addEventListener("touchmove", (e) => { if (touchY !== null) { const y = e.touches[0].clientY; feed((touchY - y) * 2.2); touchY = y; } }, { passive: true });
+  addEventListener("touchend", () => { touchY = null; });
+  addEventListener("keydown", (e) => { if (e.key === "ArrowDown" || e.key === "PageDown" || e.key === " ") { feed(260); e.preventDefault(); } });
   function goto(i) { if (!exiting) { btn.hidden = true; exiting = { to: i, at: performance.now() }; } }
   function enter(i, now) {
     clearUI(); cur = i; t0 = now;
