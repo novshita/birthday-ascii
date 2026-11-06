@@ -1,49 +1,61 @@
 (function () {
   "use strict";
   const C = window.CONFIG, A = window.ART;
-  const { TAU, clamp, smoothstep, easeOut, lerp3, mul, hash3, rnd, BUCKETS, LEVELS, DIGITS, PALETTES } = A;
+  const { TAU, clamp, smoothstep, easeOut, lerp3, mul, hash3, rnd, BUCKETS, LEVELS, DIGITS } = A;
   const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const Q = new URLSearchParams(location.search);          // debug: ?scene=1&t=4  (&blown for the cake)
 
   // ============================================================ grid + canvas
-  const FPS = 30, FONT_SIZE = 12;
-  const FONT = `${FONT_SIZE}px Menlo, Consolas, "DejaVu Sans Mono", "Courier New", monospace`;
+  // Two kinds of grid: NATIVE (big characters, 1 cell = 1 character on screen) for the countdown, and
+  // HI (180 rows of tiny characters, scaled down to the window) for the pictures, like a printed ASCII poster.
+  const NATIVE = { px: 12, rows: 0 }, HI = { px: 8, rows: 180 };
+  const FPS = 30, BG = "#04030a";
   const probe = document.createElement("canvas").getContext("2d");
-  probe.font = FONT;
-  const CW = Math.max(1, Math.round(probe.measureText("M").width)), CH = Math.round(FONT_SIZE * 1.15);
-  const ASPECT = CW / CH;                                  // a cell is about half as wide as it is tall
-  const BG = "#0b0919";
+  const masks = new Map();                                 // glyph bitmaps, rebuilt when the character size changes
+  let grid = null, FONT = "", CW = 1, CH = 1, ASPECT = 0.5;
 
   const view = document.getElementById("view"), ctx = view.getContext("2d");
   const btn = document.getElementById("next"), sr = document.getElementById("sr");
+  const ui = { title: document.getElementById("title"), cap: document.getElementById("cap"),
+    notes: document.getElementById("notes") };
   const ascii = document.createElement("canvas"), actx = ascii.getContext("2d");
   const glows = [2, 4, 8].map((s) => ({ s, el: document.createElement("canvas") }));
   let COLS, ROWS, N, W, H, S, lum, rgb, fx, img, px32, stars;
 
   function layout() {
-    ROWS = Math.max(40, Math.floor(innerHeight / CH));
-    COLS = Math.max(36, Math.floor(innerWidth / CW));
+    FONT = `${grid.px}px Menlo, Consolas, "DejaVu Sans Mono", "Courier New", monospace`;
+    probe.font = FONT;
+    CW = Math.max(1, Math.round(probe.measureText("M").width)); CH = Math.round(grid.px * 1.15);
+    ASPECT = CW / CH;                                      // a cell is about half as wide as it is tall
+    if (grid.rows) {
+      ROWS = grid.rows;
+      COLS = clamp(Math.round(ROWS * CH / CW * innerWidth / Math.max(1, innerHeight)), 80, 640);
+    } else {
+      ROWS = Math.max(40, Math.floor(innerHeight / CH)); COLS = Math.max(36, Math.floor(innerWidth / CW));
+    }
     N = COLS * ROWS; W = COLS * CW; H = ROWS * CH;
-    S = Math.min(ROWS / 72, (COLS * ASPECT) / 88);         // art is drawn in a 72-row space, scaled to fit
+    S = Math.min(ROWS / 72, (COLS * ASPECT) / 88);         // countdown art is drawn in a 72-row space, scaled to fit
     view.width = ascii.width = W; view.height = ascii.height = H;
     for (const g of glows) { g.el.width = Math.ceil(W / g.s); g.el.height = Math.ceil(H / g.s); }
     lum = new Float32Array(N); rgb = new Float32Array(N * 3); fx = new Int32Array(N);
     img = actx.createImageData(W, H); px32 = new Uint32Array(img.data.buffer);
     stars = [];
+    const density = grid.rows ? 1.2 : 2;
     for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
       const h = hash3(r, c, 5);
-      if (h % 100 < 2) stars.push({ i: r * COLS + c, p: (h >>> 8) % 628 / 100, warm: h % 3 === 0 });
+      if (h % 1000 < density * 10) stars.push({ i: r * COLS + c, p: (h >>> 8) % 628 / 100, warm: h % 3 === 0 });
     }
+    masks.clear();
   }
-  layout();
+  function useGrid(g) { if (g !== grid) { grid = g; layout(); } }
+  useGrid(NATIVE);
 
-  // virtual (art) space <-> cells. Virtual x is centred, virtual y = 36 is the middle of the screen.
-  const vX = (c) => (c + 0.5 - COLS / 2) * ASPECT / S;
-  const vY = (r) => (r + 0.5 - ROWS / 2) / S + 36;
+  // virtual (countdown) space <-> cells. Virtual x is centred, virtual y = 36 is the middle of the screen.
   const cOf = (x) => x * S / ASPECT + COLS / 2 - 0.5;
   const rOf = (y) => (y - 36) * S + ROWS / 2 - 0.5;
+  const vX = (c) => (c + 0.5 - COLS / 2) * ASPECT / S;
+  const vY = (r) => (r + 0.5 - ROWS / 2) / S + 36;
   const rowAt = (y) => Math.round(rOf(y));
-
   function paint(x0, y0, x1, y1, fn) {                     // call fn for each cell inside a virtual box
     const c0 = Math.max(0, Math.floor(cOf(x0))), c1 = Math.min(COLS - 1, Math.ceil(cOf(x1)));
     const r0 = Math.max(0, Math.floor(rOf(y0))), r1 = Math.min(ROWS - 1, Math.ceil(rOf(y1)));
@@ -55,17 +67,17 @@
   }
   function glyph(r, c, ch, l, col) {
     if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return;
-    const i = r * COLS + c; set(i, l, col); fx[i] = ch.codePointAt(0);
+    const i = r * COLS + c, k = (0.45 + 0.75 * l) * 1.6 / 1.1;     // divide out the renderer's brightness boost: colours stay true
+    set(i, l, [col[0] / k, col[1] / k, col[2] / k]); fx[i] = ch.codePointAt(0);
   }
-  function text(r, c, str, l, col) {
-    for (let k = 0; k < str.length; k++) if (str[k] !== " ") glyph(r, c + k, str[k], l, col);
-  }
+  function setT(i, l, col) { const k = (0.45 + 0.75 * l) * 1.6 / 1.1; set(i, l, [col[0] / k, col[1] / k, col[2] / k]); }
+  function text(r, c, str, l, col) { for (let k = 0; k < str.length; k++) if (str[k] !== " ") glyph(r, c + k, str[k], l, col); }
   const textC = (r, str, l, col) => text(r, Math.round((COLS - str.length) / 2), str, l, col);
 
   // ============================================================ renderer (cells -> characters -> glow)
   const CHARS = BUCKETS.join(""), START = [], COUNT = BUCKETS.map((b) => b.length);
   BUCKETS.reduce((s, b, k) => { START[k] = s; return s + b.length; }, 0);
-  const masks = new Map();
+  const BUCKET_CODES = [...CHARS].map((ch) => ch.codePointAt(0));
   function mask(code) {
     let m = masks.get(code);
     if (!m) {
@@ -79,9 +91,10 @@
     }
     return m;
   }
-  const BUCKET_CODES = [...CHARS].map((ch) => ch.codePointAt(0));
   const GLOW = 0.7;
 
+  const overlays = [];                                     // scenes queue text to draw on the glowing canvas (see letter scene)
+  let curFade = 1;
   function draw(frame) {
     px32.fill(0);
     const fidx = Math.floor(frame / 3);
@@ -107,6 +120,12 @@
       }
     }
     actx.putImageData(img, 0, 0);
+    if (overlays.length) {                                 // text is drawn in screen pixels, then glows with everything else
+      const k = Math.min(innerWidth / W, innerHeight / H), ox = (innerWidth - W * k) / 2, oy = (innerHeight - H * k) / 2;
+      actx.save(); actx.translate(-ox / k, -oy / k); actx.scale(1 / k, 1 / k); actx.globalAlpha = curFade;
+      for (const cb of overlays) cb(actx);
+      actx.restore(); overlays.length = 0;
+    }
     ctx.fillStyle = BG; ctx.fillRect(0, 0, W, H);
     ctx.drawImage(ascii, 0, 0);
     let src = ascii;                                       // glow: shrink step by step, then stretch back on top
@@ -135,10 +154,10 @@
   }
   function fireflies(t, a) {                               // slow golden dots drifting upward
     if (a <= 0) return;
-    const off = Math.floor(t * 4);
+    const off = Math.floor(t * 4), rate = grid.rows ? 1 : 2;
     for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
       const i = r * COLS + c;
-      if (lum[i] < 0.1 && hash3(c, r + off, 77) % 1000 < 2) set(i, 0.5 * a, [1, 0.8, 0.4]);
+      if (lum[i] < 0.1 && hash3(c, r + off, 77) % 1000 < rate) set(i, 0.5 * a, [1, 0.8, 0.4]);
     }
   }
   function confetti(dt, cx, cy, count, seed) {             // burst of coloured bits that arc and fall
@@ -153,6 +172,105 @@
     }
   }
   const say = (s) => { sr.textContent = s; };
+
+  // text that sits on top of the canvas (crisp and readable at any window size)
+  function setTitle(s) { if (ui.title.textContent !== s) ui.title.textContent = s; ui.title.classList.toggle("on", !!s); }
+  function setCap(s) { if (ui.cap.textContent !== s) ui.cap.textContent = s; ui.cap.classList.toggle("on", !!s); }
+  function clearUI() {
+    setTitle(""); setCap(""); ui.cap.style.bottom = ui.cap.style.top = ""; ui.notes.replaceChildren();
+  }
+  function typedSpans(el, full, typed, cursor) {           // typed text + invisible rest, so the layout never jumps
+    if (!el.firstChild) {
+      el.append(document.createElement("span"), document.createElement("span"));
+      el.lastChild.className = "ghost";
+    }
+    const n = clamp(typed, 0, full.length);
+    el.firstChild.textContent = full.slice(0, n) + (cursor ? "_" : "");
+    el.lastChild.textContent = full.slice(n);
+  }
+  const toPx = (col, row) => {                             // canvas cell -> CSS pixels
+    const k = Math.min(innerWidth / W, innerHeight / H);
+    return { x: (innerWidth - W * k) / 2 + col * CW * k, y: (innerHeight - H * k) / 2 + row * CH * k, k };
+  };
+
+  // ============================================================ coloured pictures (art/*.jpg via js/pics.js)
+  const PIC = {};
+  for (const [k, p] of Object.entries(window.PICS || {})) {
+    const bin = atob(p.rgba), px = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) px[i] = bin.charCodeAt(i);
+    PIC[k] = { cols: p.cols, rows: p.rows, px, marks: p.marks || [] };
+  }
+  const SC = new Float32Array(4);
+  function tap(p, u, v, wgt) {                             // add one smooth (bilinear) sample, alpha-weighted
+    const x = u - 0.5, y = v - 0.5, x0 = Math.floor(x), y0 = Math.floor(y), fx_ = x - x0, fy_ = y - y0;
+    for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) {
+      const a = x0 + dx, b = y0 + dy;
+      if (a < 0 || b < 0 || a >= p.cols || b >= p.rows) continue;
+      const j = (b * p.cols + a) * 4, al = p.px[j + 3] / 255 * wgt * (dx ? fx_ : 1 - fx_) * (dy ? fy_ : 1 - fy_);
+      SC[0] += p.px[j] * al; SC[1] += p.px[j + 1] * al; SC[2] += p.px[j + 2] * al; SC[3] += al;
+    }
+  }
+  function sampleC(p, u, v, d) {                           // returns alpha; colour (0..1) is left in SC[0..2]
+    SC.fill(0);
+    if (d > 0) { tap(p, u - d, v - d, 0.25); tap(p, u + d, v - d, 0.25); tap(p, u - d, v + d, 0.25); tap(p, u + d, v + d, 0.25); }
+    else tap(p, u, v, 1);
+    const a = SC[3];
+    if (a > 0.001) { SC[0] /= a * 255; SC[1] /= a * 255; SC[2] /= a * 255; }
+    return a;
+  }
+  const picX = () => 0.5 / ASPECT;                         // pictures are built for 1:2 cells; stretch if ours differ
+  const picW = (p, f) => p.cols * f * picX();
+  const fitPic = (p, padRows, padCols, maxF) => Math.min((ROWS - padRows) / p.rows, (COLS - padCols) / (p.cols * picX()), maxF);
+  // Paint a picture: f = screen cells per picture row, cx = centre column, top = first row.
+  // shade(i, alpha, colour, u 0..1, v 0..1, row, col). shift(v) sways rows sideways.
+  function drawPic(p, f, cx, top, shade, shift) {
+    const fh = f * picX(), w = p.cols * fh, h = p.rows * f, d = f < 1 ? 0.25 / f : 0;
+    const r0 = Math.max(0, Math.floor(top)), r1 = Math.min(ROWS - 1, Math.ceil(top + h));
+    const c0 = Math.max(0, Math.floor(cx - w / 2 - 8)), c1 = Math.min(COLS - 1, Math.ceil(cx + w / 2 + 8));
+    for (let r = r0; r <= r1; r++) {
+      const v = (r + 0.5 - top) / f, sh = shift ? shift(v / p.rows) : 0;
+      for (let c = c0; c <= c1; c++) {
+        const u = (c + 0.5 - cx - sh) / fh + p.cols / 2, a = sampleC(p, u, v, d);
+        if (a >= 0.12) shade(r * COLS + c, a, SC, u / p.cols, v / p.rows, r, c);
+      }
+    }
+  }
+  // light a cell with its true colour; brightness only decides how dense the character is
+  function paintCell(i, a, col, extra, wide) {
+    const luma = 0.299 * col[0] + 0.587 * col[1] + 0.114 * col[2];
+    // wide: use the full range of characters, so shadows between folds read as light, thin marks and highlights as dense ones
+    const base = wide ? 0.26 + 0.7 * Math.pow(clamp((luma - 0.18) / 0.78), 0.95) : 0.5 + 0.45 * luma;
+    const L = clamp((base + (extra || 0)) * Math.min(1, a * 1.4));
+    const k = (0.45 + 0.75 * L) * 1.6, j = i * 3, lift = 1.25 / k;       // lift the darks so every inch of the subject shows
+    lum[i] = L; fx[i] = 0;
+    const g = wide ? 0.68 : 0.8;
+    rgb[j] = Math.pow(col[0], g) * lift; rgb[j + 1] = Math.pow(col[1], g) * lift; rgb[j + 2] = Math.pow(col[2], g) * lift;
+  }
+  const BUD = [0.55, 0.74, 0.36];
+  const noise2 = (u, v) => 0.5 + 0.25 * Math.sin(u * 11 + 1.3) * Math.sin(v * 9 + 0.4) + 0.25 * Math.sin(u * 5 - v * 7 + 2.1);   // 0..1, organic blobs
+  const isGreen = (c) => c[1] > c[0] * 1.08 && c[1] > c[2] * 1.15;
+  // wind: higher = sways more, and the wave travels up the picture (same recipe as lily_bouquet.html)
+  const wind = (nv, t, amp, base) => {
+    const h = clamp((base - nv) / base), w = t - 0.45 * h;
+    return FLICK * amp * Math.pow(h, 1.4) * (0.6 * Math.sin(TAU * 2 * w / 14) + 0.3 * Math.sin(TAU * 3 * w / 14 + 1) + 0.1 * Math.sin(TAU * 5 * w / 14 + 2));
+  };
+  const sweep = (u, v, t) => {                             // a soft band of light drifting across the picture
+    const x = u * 0.8 + v * 0.6 - (((t * 0.14) % 2.2) - 0.6);
+    return FLICK * 0.2 * Math.exp(-x * x / 0.012);
+  };
+  function flame(c0, rb, h, t, k, life) {                  // one candle flame, cell coordinates
+    const sway = FLICK * (1.1 * Math.sin(t * 9 + k * 2) + 0.7 * Math.sin(t * 15 + k));
+    const hh = h * life * (1 + 0.14 * FLICK * Math.sin(t * 13 + k * 3));
+    for (let r = Math.floor(rb - hh - 1); r <= rb; r++) for (let c = c0 - 6; c <= c0 + 6; c++) {
+      if (r < 0 || r >= ROWS || c < 0 || c >= COLS) continue;
+      const u = (rb - r) / hh;
+      if (u < 0 || u > 1) continue;
+      const hw = 3.4 * Math.sin(Math.PI * Math.pow(u, 0.6)) * (1 - 0.3 * u) * life, dx = c - (c0 + sway * u * u);
+      if (Math.abs(dx) > hw) continue;
+      const core = 1 - Math.abs(dx) / (hw + 1e-3);
+      set(r * COLS + c, clamp(0.7 + 0.35 * core), u < 0.14 ? [0.45, 0.65, 1] : lerp3([1, 0.5, 0.1], [1, 0.95, 0.6], core * 1.2 - u * 0.4));
+    }
+  }
 
   // ============================================================ scene 1: countdown
   function drawNumber(str, cy, scale, alpha, t, gold) {
@@ -171,105 +289,241 @@
       const l = (0.55 + 0.4 * Math.sqrt(clamp(edge * 2)) + shim) * alpha;
       const k = (y - y0) / (7 * P);
       const col = gold ? lerp3(GOLD, ROSE, k + 0.25 * Math.sin(x * 0.2 - t * 3 * FLICK)) : lerp3([0.55, 0.82, 1], [0.78, 0.62, 1], k);
-      set(i, l, col);
+      setT(i, l, col);
     });
   }
 
+  // ---- butterfly-charm curtain: strands of glowing beads and butterflies that drop in, then part like a curtain
+  const BEADS = [[1, 0.75, 0.4], [0.5, 0.85, 1], [1, 0.6, 0.8], [0.75, 0.65, 1], [0.5, 1, 0.75], [1, 0.55, 0.35]];
+  const BF_OPEN = [" \\\\ | // ", "<@@\\|/@@>", " <@/|\\@> "];     // wings spread
+  const BF_SHUT = ["  \\ | /  ", "  (@|@)  ", "   \\|/   "];       // wings up
+  const ease2 = (x) => { x = clamp(x); return x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2; };
+
+  // ---- the curtain: hanging chains of letters, each pinned at the top and simulated with Verlet physics (the same idea as
+  // the Temple of Heaven curtain). The pointer pushes nearby letters, so they swing; every column plays a chime note.
+  const PHYS = { strength: 0.72, reach: 4.2, friction: 0.965, gravity: 0.02, iters: 8 };   // distances are in rows (1 row ~ 14px)
+  const LETTERS = ("HAPPYBIRTHDAY" + String(C.name || "").toUpperCase().replace(/[^A-Z]/g, "") + String(C.age)).split("");
+  let chains = [], chainKey = "", sweptPx = 0, pointer = { x: 0, y: 0, has: false };
+
+  function buildCurtain() {                                    // rebuilt whenever the grid size changes
+    const K = Math.max(8, Math.floor(COLS / 6.5)), total = COLS * ASPECT;
+    chainKey = COLS + "x" + ROWS;
+    chains = Array.from({ length: K }, (_, k) => {
+      const len = Math.round(ROWS * (0.62 + 0.2 * rnd(k, 42))), n = len + 1;
+      return { k, K, n, ax: total * (0.04 + 0.92 * (k + 0.5) / K), len, stagger: rnd(k, 43) * 0.35, col: BEADS[k % BEADS.length],
+        off: Math.floor(rnd(k, 47) * LETTERS.length), bf: k % 3 === 1 ? 8 + Math.floor(rnd(k, 48) * (len - 18)) : -1, ph: rnd(k, 46) * TAU,
+        x: new Float32Array(n), y: new Float32Array(n), px: new Float32Array(n), py: new Float32Array(n), heat: new Float32Array(n),
+        cool: 0, placed: false };
+    });
+  }
+  function anchors(ch, drop, open) {                           // where this chain hangs from: it drops in from above, then slides to the side
+    const total = COLS * ASPECT, mid = total / 2;
+    const e = ease2((open - 0.3 * (1 - Math.abs(ch.ax - mid) / mid)) / 0.7);
+    const x = ch.ax < mid ? ch.ax * (1 - 0.9 * e) : total - (total - ch.ax) * (1 - 0.9 * e);
+    return [x, -(1 - easeOut(clamp((drop - ch.stagger) / 0.65))) * (ch.len + 3)];
+  }
+  function stepChain(ch, ax, ay, steps) {
+    if (!ch.placed) {                                          // first time: just hang straight below the anchor
+      for (let i = 0; i < ch.n; i++) { ch.x[i] = ch.px[i] = ax; ch.y[i] = ch.py[i] = ay + i; }
+      ch.placed = true; return;
+    }
+    const { x, y, px, py, n } = ch, fr = PHYS.friction;
+    for (let s = 0; s < steps; s++) {
+      for (let i = 1; i < n; i++) {
+        const vx = (x[i] - px[i]) * fr, vy = (y[i] - py[i]) * fr;
+        px[i] = x[i]; py[i] = y[i]; x[i] += vx; y[i] += vy + PHYS.gravity;
+      }
+      for (let it = 0; it < PHYS.iters; it++) {
+        x[0] = px[0] = ax; y[0] = py[0] = ay;
+        for (let i = 0; i < n - 1; i++) {
+          const dx = x[i + 1] - x[i], dy = y[i + 1] - y[i], d = Math.hypot(dx, dy);
+          if (d < 1e-6) continue;
+          const f = (d - 1) / d;
+          if (i === 0) { x[1] -= dx * f; y[1] -= dy * f; }     // the anchor never moves
+          else { x[i] += dx * f * 0.5; y[i] += dy * f * 0.5; x[i + 1] -= dx * f * 0.5; y[i + 1] -= dy * f * 0.5; }
+        }
+      }
+    }
+  }
+  // push every letter near the pointer's previous spot along the pointer's movement (linear falloff), like the reference
+  function pushCurtain(fromX, fromY, dX, dY, speedPx) {
+    let touched = false;
+    for (const ch of chains) {
+      let best = 0;
+      for (let i = 1; i < ch.n; i++) {
+        const d = Math.hypot(ch.x[i] - fromX, ch.y[i] - fromY);
+        if (d >= PHYS.reach) continue;
+        const fall = 1 - d / PHYS.reach;
+        ch.x[i] += dX * PHYS.strength * fall; ch.y[i] += dY * PHYS.strength * fall;
+        ch.heat[i] = Math.min(1, ch.heat[i] + fall * 0.8);
+        best = Math.max(best, speedPx * fall); touched = true;
+      }
+      if (best >= 1.1) chime(ch, best);
+    }
+    if (touched) sweptPx += speedPx;
+  }
+  const toRows = (cx, cy) => {                                  // screen pixels -> physics units (x in rows, y in rows)
+    const k = Math.min(innerWidth / W, innerHeight / H);
+    return [((cx - (innerWidth - W * k) / 2) / (CW * k)) * ASPECT, (cy - (innerHeight - H * k) / 2) / (CH * k)];
+  };
+  let curtainLive = false;                                      // only the countdown scene reacts to the pointer
+  addEventListener("pointermove", (ev) => {
+    const [x, y] = toRows(ev.clientX, ev.clientY);
+    if (curtainLive && pointer.has) {
+      const dxp = ev.clientX - pointer.cx, dyp = ev.clientY - pointer.cy, sp = Math.hypot(dxp, dyp);
+      if (sp >= 0.01 && sp <= 80) pushCurtain(pointer.x, pointer.y, x - pointer.x, y - pointer.y, sp);
+    }
+    pointer = { x, y, cx: ev.clientX, cy: ev.clientY, has: true };
+  });
+  addEventListener("pointerleave", () => { pointer.has = false; });
+  document.addEventListener("pointerleave", () => { pointer.has = false; });
+
+  // ---- chimes: first click or tap switches the sound on (browsers require a gesture). One note per column, on a 10-note scale.
+  let AC = null, master = null, lastChime = 0, voices = 0;
+  const SCALE = [523.25, 587.33, 659.25, 783.99, 880, 1046.5, 1174.66, 1318.51, 1567.98, 1760];
+  function audioInit() {
+    if (AC) { if (AC.state === "suspended") AC.resume(); return; }
+    try {
+      AC = new (window.AudioContext || window.webkitAudioContext)();
+      const comp = AC.createDynamicsCompressor(), delay = AC.createDelay(), fb = AC.createGain(), wet = AC.createGain();
+      delay.delayTime.value = 0.11; fb.gain.value = 0.14; wet.gain.value = 0.13;
+      master = AC.createGain(); master.connect(comp); master.connect(delay); delay.connect(fb); fb.connect(delay); delay.connect(wet); wet.connect(comp); comp.connect(AC.destination);
+    } catch (e) { AC = null; }
+  }
+  addEventListener("pointerdown", audioInit);
+  addEventListener("keydown", audioInit);
+  function chime(ch, impact) {
+    if (!AC || AC.state !== "running") return;
+    const now = AC.currentTime;
+    if (now < ch.cool || now - lastChime < 0.028 || voices >= 8) return;
+    ch.cool = now + 0.095; lastChime = now; voices++;
+    const base = SCALE[Math.floor(ch.k / ch.K * SCALE.length)], amp = Math.min(0.1, 0.03 + impact * 0.004), dur = 0.72 + Math.random() * 0.32;
+    const pan = AC.createStereoPanner ? AC.createStereoPanner() : null, out = AC.createGain();
+    if (pan) { pan.pan.value = clamp(((ch.k + 0.5) / ch.K * 2 - 1) * 0.9, -0.9, 0.9); out.connect(pan); pan.connect(master); } else out.connect(master);
+    out.gain.setValueAtTime(0.0001, now); out.gain.linearRampToValueAtTime(amp, now + 0.006); out.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+    [[1, 1], [2.003, 0.35], [4.01, 0.12]].forEach(([m, g], i) => {
+      const o = AC.createOscillator(), og = AC.createGain();
+      o.type = "sine"; o.frequency.value = base * m * (1 + (Math.random() - 0.5) * 0.004); og.gain.value = g;
+      o.connect(og); og.connect(out); o.start(now); o.stop(now + dur + 0.05);
+      if (i === 0) o.onended = () => { voices--; };
+    });
+  }
+
+  function drawCurtain(t) {
+    for (const ch of chains) {
+      const { x, y, heat, n } = ch;
+      for (let i = 0; i < n; i++) {
+        const c = Math.round(x[i] / ASPECT), r = Math.round(y[i]);
+        if (r < 0 || r >= ROWS || c < 0 || c >= COLS) { heat[i] *= 0.9; continue; }
+        const h = heat[i]; heat[i] *= 0.93;
+        const pat = 0.5 + 0.5 * Math.sin(ch.k * 1.7 + i * 0.9), bead = i % 9 === 8 || i === n - 1;
+        glyph(r, c, bead ? "o" : LETTERS[(ch.off + i) % LETTERS.length], clamp(0.45 + 0.25 * pat + 0.5 * h + (bead ? 0.15 : 0)), lerp3(ch.col, [1, 1, 0.95], h * 0.7));
+      }
+      if (ch.bf >= 0 && ch.bf < n) {                           // a butterfly charm hanging from this chain
+        const c0 = Math.round(x[ch.bf] / ASPECT), r0 = Math.round(y[ch.bf]), hot = heat[ch.bf] > 0.25;
+        const flap = !reduce && Math.sin(t * (hot ? 12 : 5) + ch.ph) > 0.2, spr = flap ? BF_SHUT : BF_OPEN;
+        const col = lerp3(ch.col, BEADS[(ch.k + 2) % BEADS.length], 0.5 + 0.5 * Math.sin(t * 1.5 + ch.ph));
+        spr.forEach((row, dr) => [...row].forEach((chr, dc) => {
+          if (chr !== " ") glyph(r0 + dr - 1, c0 + dc - 4, chr, chr === "|" ? 0.55 : 0.9, chr === "|" ? [1, 0.85, 0.5] : col);
+        }));
+      }
+    }
+  }
+  function firework(dt, cx, cy, seed, hue) {                   // radial burst of sparks that fade and fall; cx, cy in cells
+    if (dt < 0 || dt > 1.9) return;
+    const life = 1 - smoothstep(1.1, 1.9, dt), cols = [[1, 0.8, 0.4], [1, 0.5, 0.7], [0.55, 0.85, 1], [0.8, 0.65, 1], [0.6, 1, 0.7]];
+    if (dt < 0.12) for (let k = 0; k < 6; k++) glyph(Math.round(cy), Math.round(cx) + k - 3, "*", 1, [1, 1, 0.95]);   // flash
+    for (let k = 0; k < 44; k++) {
+      const ang = (k / 44) * TAU + rnd(seed, 3) * 6, sp = 14 + rnd(k, seed) * 12;
+      for (let q = 0; q < 3; q++) {                            // each spark leaves a short trail
+        const d = Math.max(0, dt - q * 0.05), dist = sp * d * (1 - 0.3 * d);
+        glyph(Math.round(cy + Math.sin(ang) * dist + 9 * d * d), Math.round(cx + Math.cos(ang) * dist * 2),
+          q ? "." : "*+"[k % 2], (q ? 0.45 : 0.95) * life, cols[(hue + (k % 3)) % cols.length]);
+      }
+    }
+  }
+  const BURSTS = [[1.5, 0.22, 0.3], [2.1, 0.78, 0.26], [2.7, 0.5, 0.18], [3.5, 0.32, 0.42], [4.1, 0.7, 0.4], [4.9, 0.5, 0.3], [5.7, 0.18, 0.25], [6.1, 0.84, 0.3], [6.8, 0.5, 0.2]];
+
   const countdown = {
-    start() { say("Counting down to " + C.age); },
+    grid: NATIVE, openAt: null, swept0: 0,
+    start() { this.openAt = null; chains = []; chainKey = ""; sweptPx = 0; curtainLive = true; say("Counting down to " + C.age + ". Then a curtain of letters: sweep the pointer through it to open it."); },
     frame(t) {
       backdrop(t);
-      const n = C.countdownFrom;
+      const n = C.countdownFrom, ready = n + 1.3;
+      if (chainKey !== COLS + "x" + ROWS) buildCurtain();
       if (t < n) {
-        const step = Math.floor(t), lt = t - step;
-        drawNumber(String(n - step), 32, 1 + 0.35 * (1 - easeOut(lt * 3)), 1 - smoothstep(0.78, 1, lt), t, false);
+        const step = Math.floor(t), st = t - step;
+        drawNumber(String(n - step), 32, 1 + 0.35 * (1 - easeOut(st * 3)), 1 - smoothstep(0.78, 1, st), t, false);
         textC(rowAt(58), "Counting down to " + C.age, 0.7, [0.7, 0.75, 1]);
-      } else {
-        const lt = t - n;
-        drawNumber(String(C.age), 32, 1 + 0.5 * (1 - easeOut(lt * 2.2)), smoothstep(0, 0.35, lt), t, true);
-        if (!reduce) confetti(lt, 0, 32, 90, 3);
-        const a = smoothstep(0.8, 1.6, lt);
-        if (a > 0) textC(rowAt(58), "Happy birthday, " + C.name, 0.9 * a, CREAM);
-        if (lt > 4.2) return "next";
       }
+      // the curtain opens when it has been swept enough, or after a few seconds on its own
+      if (this.openAt === null && t > ready) {
+        if (Q.has("open")) this.openAt = n + Number(Q.get("open"));
+        else if (sweptPx > 700 || t > ready + 9) this.openAt = t;
+      }
+      if (Q.has("sweep") && this.openAt === null && t > ready && t < ready + 3) {   // debug: simulate a pointer sweeping across
+        const px = (COLS * ASPECT) * (0.1 + 0.8 * ((t - ready) / 1.6 % 1)), py = ROWS * 0.4, last = this.simX;
+        if (last !== undefined) pushCurtain(last, py, px - last, 0.2, Math.abs(px - last) * CH);
+        this.simX = px;
+      }
+      const ot = this.openAt === null ? -1 : t - this.openAt;
+      if (ot > 0.8) {                                          // behind the curtain: the big number and the party
+        const at = ot - 0.8;
+        drawNumber(String(C.age), 32, 1 + 0.5 * (1 - easeOut(at * 2.2)), smoothstep(0, 0.35, at), t, true);
+        if (!reduce) {
+          confetti(at, 0, 32, 100, 3);
+          for (const [bt, bx, by] of BURSTS) firework(at - bt, bx * COLS, by * ROWS, Math.round(bt * 10), Math.round(bx * 10));
+        }
+        setTitle(at > 0.5 ? "Hurray! Happy birthday, " + C.name : "");
+        if (at > 8.5) { curtainLive = false; return "next"; }
+      }
+      const drop = clamp((t - (n - 0.5)) / 1.3), open = this.openAt === null ? 0 : clamp(ot / 2.8);
+      if (drop > 0) {
+        for (const ch of chains) { const [ax, ay] = anchors(ch, drop, open); stepChain(ch, ax, ay, 2); }
+        drawCurtain(t);
+      }
+      setCap(drop >= 1 && this.openAt === null ? "Sweep your cursor or finger through the curtain  -  click once for chimes" : "");
     },
   };
 
-  // ============================================================ scene 2: cake
-  const CANDLES = [-16, -8, 0, 8, 16];
-  const CANDLE_COLS = [[1, 0.5, 0.65], [0.55, 0.8, 1], [1, 0.85, 0.4], [0.7, 0.55, 1], [0.5, 0.9, 0.6]];
-  const drip = (x) => 2.2 + 2.4 * (0.5 + 0.5 * Math.sin(x * 0.55)) + 2.0 * Math.max(0, Math.sin(x * 1.35 + 1.1));
-
-  function tier(hw, yTop, yBot, sponge, frost, warm) {
-    paint(-hw - 1, yTop - 3, hw + 1, yBot + 3, (i, x, y) => {
-      const ex = x / hw, ey = (y - yTop) / 2.6, cyl = Math.sqrt(Math.max(0, 1 - ex * ex));
-      if (Math.abs(ex) < 1 && ex * ex + ey * ey < 1) {     // top face
-        set(i, (0.5 + 0.14 * (1 - ey * ey)) * warm, frost); return;
-      }
-      if (Math.abs(ex) >= 1 || y < yTop || y > yBot + 2.4 * cyl) return;
-      const yd = y - yTop, h = yBot - yTop;
-      let col, l = (0.3 + 0.4 * cyl) * warm;
-      if (yd < drip(x)) { col = lerp3(frost, [0.9, 0.45, 0.62], 0.3 * (1 - cyl)); l += 0.1; }
-      else if (yd > h * 0.5 && yd < h * 0.5 + 1.5) { col = [0.95, 0.3, 0.42]; l += 0.05; }
-      else if (yd > h * 0.5 - 1.8 && yd <= h * 0.5) { col = [1, 0.92, 0.78]; }
-      else col = sponge;
-      set(i, clamp(l), col);
-    });
-  }
-
+  // ============================================================ scene 2: cake (art/cake.jpg)
   const cake = {
-    blowAt: null, btn: 0, btn2: 0,
-    start() { this.blowAt = Q.has("blown") ? 0 : null; this.btn = this.btn2 = 0; say("A cake with five candles. Make a wish."); },
+    grid: HI, blowAt: null, btn: 0, btn2: 0,
+    start() { this.blowAt = Q.has("blown") ? 0 : null; this.btn = this.btn2 = 0; say("A cake with cherries and candles. Make a wish."); },
     frame(t, T) {
       backdrop(t);
+      const p = PIC.cake, marks = p.marks, f = fitPic(p, 48, 20, 1.25), w = picW(p, f), h = p.rows * f;
+      const cx = COLS / 2, top = 22;
       const out = (k) => this.blowAt === null ? 0 : smoothstep(this.blowAt + k * 0.16, this.blowAt + k * 0.16 + 0.4, t);
       let alive = 0;
-      for (let k = 0; k < CANDLES.length; k++) alive += 1 - out(k);
-      const flick = 0.93 + 0.07 * Math.sin(t * 11 * FLICK) * Math.sin(t * 5.3 * FLICK);
-      const warm = 0.62 + 0.38 * (alive / CANDLES.length) * flick;
-      // plate
-      paint(-42, 55, 42, 62, (i, x, y) => {
-        const q = (x / 41) ** 2 + ((y - 58.5) / 3) ** 2;
-        if (q < 1) set(i, (0.35 + 0.35 * (1 - q)) * warm, [0.78, 0.8, 0.9]);
+      for (let k = 0; k < marks.length; k++) alive += 1 - out(k);
+      const flick = 0.95 + 0.05 * Math.sin(t * 11 * FLICK) * Math.sin(t * 5.3 * FLICK);
+      const warm = 0.82 + 0.18 * (alive / marks.length) * flick, appear = smoothstep(0, 1.2, t);
+      drawPic(p, f, cx, top, (i, a, col, nu, nv, r, c) => {
+        if (!reduce && col[0] + col[1] + col[2] > 2.0 && hash3(r, c, Math.floor(t * 5)) % 500 === 0) { set(i, 1, [1, 1, 0.95]); return; }   // twinkle
+        const show = smoothstep((1 - nv) * 1.4 + 0.5 * noise2(nu, nv), (1 - nv) * 1.4 + 0.5 * noise2(nu, nv) + 0.5, t);
+        if (show > 0) paintCell(i, a * show * warm, col, sweep(nu, nv, t) * 1.5, true);
       });
-      tier(30, 41, 56, [0.5, 0.26, 0.14], [0.95, 0.6, 0.74], warm);
-      tier(20, 27, 41, [0.55, 0.3, 0.16], [0.9, 0.66, 0.9], warm);
-      for (let px = -26; px <= 26; px += 5.2) {            // pearls on the bottom tier
-        paint(px - 1.4, 51, px + 1.4, 54, (i, x, y) => {
-          const q = ((x - px) / 1.2) ** 2 + ((y - 52.8) / 1.1) ** 2;
-          if (q < 1) set(i, (0.7 - 0.2 * q) * warm, [0.95, 0.85, 0.65]);
-        });
-      }
-      // candles, flames, smoke
-      CANDLES.forEach((cx, k) => {
-        paint(cx - 1.3, 16, cx + 1.3, 28, (i, x, y) => {
-          if (Math.abs(x - cx) < 1.15 && y > 17 && y < 27.6) {
-            const stripe = Math.floor((y + 40) / 1.7) % 2;
-            set(i, (0.55 + 0.25 * (1 - Math.abs(x - cx) / 1.15)) * warm, mul(CANDLE_COLS[k], stripe ? 1 : 0.62));
-          } else if (Math.abs(x - cx) < 0.35 && y > 15.8 && y <= 17) set(i, 0.5, [0.3, 0.25, 0.25]);
-        });
-        const life = 1 - out(k);
+      marks.forEach((m, k) => {                            // a flame on each cherry stem
+        const col = Math.round(cx + (m[0] - 0.5) * w), base = Math.round(top + m[1] * h);
+        const life = (1 - out(k)) * smoothstep(0.6, 1.4, t);
         if (life > 0.02) {
-          const h = 8.5 * life * (1 + 0.14 * FLICK * Math.sin(t * 13 + k * 3)), sway = FLICK * (0.8 * Math.sin(t * 9 + k * 2) + 0.5 * Math.sin(t * 15 + k));
-          paint(cx - 4, 16.5 - h - 1, cx + 4, 17, (i, x, y) => {
-            const u = (16.5 - y) / h;
-            if (u < 0 || u > 1) return;
-            const hw = 1.7 * Math.sin(Math.PI * Math.pow(u, 0.6)) * (1 - 0.3 * u) * life, dx = x - (cx + sway * u * u);
-            if (Math.abs(dx) > hw) return;
-            const core = 1 - Math.abs(dx) / (hw + 1e-3);
-            const col = u < 0.14 ? [0.45, 0.65, 1] : lerp3([1, 0.5, 0.1], [1, 0.95, 0.6], core * 1.2 - u * 0.4);
-            set(i, clamp(0.7 + 0.35 * core), col);
-          });
-        } else if (this.blowAt !== null) {                  // smoke after the flame goes out
+          flame(col, base, 10, t, k, life);
+          if (!reduce) for (let q = 0; q < 5; q++) {         // sparks rising from the flame
+            const age = (t * 0.7 + rnd(k * 9 + q, 4)) % 1;
+            glyph(Math.round(base - 11 - age * 22), Math.round(col + 5 * Math.sin(t * 1.3 + k + q * 2) * age), q % 2 ? "." : "*", 0.8 * (1 - age) * life, [1, 0.8, 0.4]);
+          }
+        }
+        else if (this.blowAt !== null) {                    // smoke once the flame is out
           const age = t - (this.blowAt + k * 0.16 + 0.3), a = 1 - smoothstep(2, 3.4, age);
-          if (age > 0 && a > 0) for (let d = 0; d < Math.min(15, age * 7); d++) {
-            const sx = cx + 1.8 * Math.sin(d * 0.55 - t * 2) * (d / 14 + 0.25);
-            glyph(Math.round(rOf(16 - d)), Math.round(cOf(sx)), d % 3 === 0 ? "~" : d % 3 === 1 ? "'" : ".", 0.4 * a * (1 - d / 16), [0.7, 0.7, 0.8]);
+          if (age > 0 && a > 0) for (let d = 0; d < Math.min(14, age * 6); d++) {
+            const sc = col + Math.round(2.5 * Math.sin(d * 0.55 - t * 2) * (d / 14 + 0.25));
+            glyph(base - d, sc, d % 3 === 0 ? "~" : d % 3 === 1 ? "'" : ".", 0.4 * a * (1 - d / 16), [0.7, 0.7, 0.8]);
           }
         }
       });
       fireflies(t, smoothstep(1, 3, t) * warm);
-      textC(rowAt(66), alive > 0 ? "Make a wish." : "May every wish come true.", 0.85, CREAM);
+      setCap(alive > 0 ? "Make a wish." : "May every wish come true.");
       if (this.blowAt === null && !this.btn && t > 2.4) {
         this.btn = 1;
         showBtn("Blow out the candles", () => { this.blowAt = T(); });
@@ -281,8 +535,10 @@
     },
   };
 
-  // ============================================================ scene 3: letter
-  const CPS = reduce ? 1e6 : 28;
+  // ============================================================ scene 3: letter (art/letter.jpg, then the letter pops out)
+  // 1) the envelope shows alone  2) it slides left  3) the letter pops out of it  4) the letter types itself, in ASCII
+  const CPS = reduce ? 1e6 : 26;
+  const TL = reduce ? { slide: 0.1, slideD: 0.01, pop: 0.2, popD: 0.01, type: 0.3 } : { slide: 3, slideD: 1.4, pop: 4.2, popD: 2.0, type: 6.6 };
   const letterTimes = []; let letterEnd = 0;
   (function () {
     let cur = 0;
@@ -296,11 +552,11 @@
     }
     letterEnd = cur;
   })();
-
+  const easeInOut = (x) => { x = clamp(x); return x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2; };
+  const easeBack = (x) => { x = clamp(x); const c = 1.7; return 1 + (c + 1) * Math.pow(x - 1, 3) + c * Math.pow(x - 1, 2); };
   function wrap(str, width) {                              // words -> lines of {ch, k} (k = index in the paragraph)
-    const words = [...str.matchAll(/\S+/g)], lines = [];
-    let line = [], len = 0;
-    for (const w of words) {
+    const lines = []; let line = [], len = 0;
+    for (const w of str.matchAll(/\S+/g)) {
       if (line.length && len + 1 + w[0].length > width) { lines.push(line); line = []; len = 0; }
       if (line.length) { line.push({ ch: " ", k: w.index - 1 }); len++; }
       for (let q = 0; q < w[0].length; q++) line.push({ ch: w[0][q], k: w.index + q });
@@ -309,185 +565,187 @@
     if (line.length) lines.push(line);
     return lines;
   }
+  const SCRAMBLE = "#@$%&8WM*+=";
 
   const letter = {
-    btn: 0,
+    grid: HI, btn: 0,
     start() { this.btn = 0; say(C.letter.join(" ")); },
     frame(t) {
       backdrop(t);
-      const width = Math.min(66, COLS - 12);
-      const body = [];
-      C.letter.forEach((p, pi) => { if (pi) body.push(null); wrap(p, width).forEach((ln) => body.push({ ln, pi })); });
-      const bw = width + 6, bh = body.length + 4;
-      const top = Math.max(1, Math.floor((ROWS - bh) / 2) - 1), left = Math.floor((COLS - bw) / 2);
-      const edge = [0.8, 0.6, 0.35], ea = smoothstep(0, 0.8, t) * 0.5;
-      const label = " a letter to myself ";
-      for (let c = 0; c < bw; c++) {                       // frame
-        const ch = c % 4 === 0 ? "+" : "-";
-        glyph(top, left + c, ch, ea, edge); glyph(top + bh - 1, left + c, ch, ea, edge);
-      }
-      for (let r = 1; r < bh - 1; r++) { glyph(top + r, left, "|", ea, edge); glyph(top + r, left + bw - 1, "|", ea, edge); }
-      const lc = left + Math.floor((bw - label.length) / 2);
-      for (let k = 0; k < label.length; k++) glyph(top, lc + k, label[k] === " " ? " " : label[k], label[k] === " " ? 0 : ea * 1.8, GOLD);
-      let lastR = -1, lastC = 0, typed = 0;
-      body.forEach((row, ri) => {
-        if (!row) return;
-        const r = top + 2 + ri;
-        row.ln.forEach((cell, ci) => {
-          const at = letterTimes[row.pi][cell.k];
-          if (t < at) return;
-          const fresh = Math.max(0, 1 - (t - at) * 3);
-          const c = left + 3 + ci;
-          glyph(r, c, cell.ch, 0.8 + 0.3 * fresh, row.pi === 0 ? ROSE : lerp3(CREAM, GOLD, fresh));
-          lastR = r; lastC = c + 1; typed++;
-        });
-      });
-      const done = t > letterEnd;
-      if (!done && lastR >= 0 && Math.floor(t * 2.5) % 2 === 0) glyph(lastR, lastC, "_", 0.9, GOLD);
+      const wide = innerWidth >= 820, p = PIC.letter;
+      const fA = fitPic(p, 28, 60, 1.4), fB = wide ? fitPic(p, 32, COLS * 0.5 + 10, 1.2) : fA * 0.85;
+      const e = easeInOut((t - TL.slide) / TL.slideD);
+      const f = fA + (fB - fA) * e, w = picW(p, f), h = p.rows * f;
+      const cx = COLS / 2 + ((wide ? COLS * 0.27 : COLS / 2) - COLS / 2) * e;
+      const top = (ROWS - h) / 2 + FLICK * 1.6 * Math.sin(t * 0.9);
+      const dim = wide ? 1 : 1 - 0.88 * smoothstep(TL.pop, TL.pop + 1, t);      // on narrow screens the envelope fades behind the letter
+      drawPic(p, f, cx, top, (i, a, col, nu, nv, r, c) => {
+        if (!reduce && col[0] + col[1] + col[2] > 2.4 && hash3(r, c, Math.floor(t * 4)) % 600 === 0) { set(i, 1, [1, 1, 0.95]); return; }
+        const T0 = (1 - nv) * 1.2 + 0.5 * noise2(nu, nv), show = smoothstep(T0, T0 + 0.5, t);
+        if (show > 0) paintCell(i, a * show * dim, col, sweep(nu, nv, t) * 1.5);
+      }, (nv) => wind(nv, t * 1.4, 0.012 * COLS, 1.0));
       fireflies(t, 0.6);
+
+      // ---- the letter: an ASCII frame and typed text, drawn on the canvas so it glows like everything else
+      const fs = innerWidth < 520 ? 12 : 15, boxMax = wide ? Math.min(600, innerWidth * 0.46) : Math.min(560, innerWidth * 0.92);
+      actx.font = `${fs}px Menlo, Consolas, "DejaVu Sans Mono", monospace`;
+      const cw = actx.measureText("M").width, n = Math.max(16, Math.floor(boxMax / cw) - 4), lh = fs * 1.62;
+      const body = [];
+      C.letter.forEach((txt, pi) => { if (pi) body.push(null); wrap(txt, n).forEach((ln) => body.push({ ln, pi })); });
+      const boxW = (n + 4) * cw, boxH = (body.length + 4) * lh;
+      const fx_ = wide ? innerWidth * 0.52 + boxW / 2 : innerWidth / 2, fy_ = wide ? innerHeight / 2 : innerHeight * 0.5;
+      const mouth = toPx(cx + 0.1 * w / 2, top + 0.34 * h);                  // where the letter sticks out of the envelope
+      const pp = easeBack((t - TL.pop) / TL.popD), sc = Math.max(0.02, pp), vis = t >= TL.pop;
+      const mv = easeInOut((t - TL.pop) / TL.popD), cxp = mouth.x + (fx_ - mouth.x) * mv, cyp = mouth.y + (fy_ - mouth.y) * mv - Math.sin(Math.PI * mv) * 28, rot = (1 - mv) * -0.14;
+      let typedAny = -1, lastX = 0, lastY = 0, done = t > TL.type + letterEnd;
+      const tt = t - TL.type;
+      overlays.push((g) => {
+        g.textBaseline = "top"; g.font = `${fs}px Menlo, Consolas, "DejaVu Sans Mono", monospace`;
+        if (t > 1.2 && t < TL.slide + 1) {                                   // a little caption while the envelope sits alone
+          g.fillStyle = `rgba(255,220,160,${0.8 * smoothstep(1.2, 2, t) * (1 - smoothstep(TL.slide - 0.4, TL.slide + 0.6, t))})`;
+          const msg = "- a letter, just for you -";
+          g.fillText(msg, innerWidth / 2 - msg.length * cw / 2, innerHeight * 0.9);
+        }
+        if (!vis) return;
+        g.save(); g.translate(cxp, cyp); g.rotate(rot); g.scale(sc, sc); g.translate(-boxW / 2, -boxH / 2);
+        g.fillStyle = "rgba(255,225,185,0.035)"; g.fillRect(0, 0, boxW, boxH);
+        const bc = "rgba(255,184,96,0.85)";
+        g.fillStyle = bc;
+        const label = " a letter to myself ", pad = Math.max(0, n + 4 - 3 - label.length - 1);
+        g.fillText("+--" + label + "-".repeat(pad) + "+", 0, 0);
+        g.fillText("+" + "-".repeat(n + 2) + "+", 0, boxH - lh);
+        for (let r = 1; r < body.length + 3; r++) { g.fillText("|", 0, r * lh); g.fillText("|", (n + 3) * cw, r * lh); }
+        if (sc > 0.7 && tt > 0) {
+          body.forEach((row, ri) => {
+            if (!row) return;
+            const y = (2 + ri) * lh;
+            row.ln.forEach((cell, ci) => {
+              const at = letterTimes[row.pi][cell.k];
+              if (tt < at) return;
+              const age = tt - at, x = (2 + ci) * cw;
+              if (cell.ch === " ") return;
+              const fresh = Math.max(0, 1 - age * 3);
+              g.fillStyle = row.pi === 0 ? "rgb(255,150,185)" : fresh > 0 ? `rgb(255,${200 + 40 * (1 - fresh) | 0},${120 + 90 * (1 - fresh) | 0})` : "rgb(255,238,205)";
+              g.fillText(age < 0.09 && !reduce ? SCRAMBLE[(ci * 7 + ri * 3 + Math.floor(t * 30)) % SCRAMBLE.length] : cell.ch, x, y);
+              typedAny = row.pi; lastX = x + cw; lastY = y;
+            });
+          });
+          if (!done && typedAny >= 0 && Math.floor(t * 2.5) % 2 === 0) { g.fillStyle = "rgb(255,200,110)"; g.fillText("_", lastX, lastY); }
+        }
+        g.restore();
+      });
       if (done && !this.btn) { this.btn = 1; showBtn("Walk into the garden", () => goto(3)); }
     },
   };
 
-  // ============================================================ scene 4: garden
-  const GROUND = 60, STEM_T = 1.1, BLOOM_T = 1.4, GAP_T = reduce ? 0.3 : 1.5, T0 = reduce ? 0.3 : 0.8;
-  const STEM_COL = [0.25, 0.58, 0.28], LEAF_D = [0.08, 0.36, 0.14], LEAF_L = [0.4, 0.78, 0.34];
-  const sway = (y, i, t) => FLICK * (1.2 * Math.sin(t * 1.6 + i * 0.8) + 0.5 * Math.sin(t * 3.1 + i)) * Math.pow(clamp((GROUND - y) / 36), 1.5);
-
-  function wrapPlain(str, width) {
-    const out = []; let line = "";
-    for (const w of str.split(" ")) {
-      if (line && (line + " " + w).length > width) { out.push(line); line = w; } else line = line ? line + " " + w : w;
-    }
-    if (line) out.push(line);
-    return out;
-  }
+  // ============================================================ scene 4: garden (art/bouquet.jpg)
+  const GROW = reduce ? 0.2 : 4.5, FIRST = reduce ? 0.3 : 6, EVERY = reduce ? 0.3 : 1.6, CPT = 24;
+  const PETALS = [[1, 0.72, 0.82], [1, 0.86, 0.92], [0.95, 0.58, 0.72], [1, 0.8, 0.7]];
 
   const garden = {
-    btn: 0, flowers: [],
+    grid: HI, btn: 0, notes: [],
     start() {
       this.btn = 0;
-      say("A garden. Each flower blooms with a message: " + C.affirmations.join(" "));
+      this.notes = C.affirmations.map((msg, k) => {
+        const el = document.createElement("div");
+        el.className = "note " + (k % 2 === 0 ? "left" : "right");
+        ui.notes.append(el);
+        return el;
+      });
+      say("A bouquet. Each flower carries a message: " + C.affirmations.join(" "));
     },
-    build() {
-      const n = C.affirmations.length, widthU = COLS * ASPECT / S;
-      const spacing = Math.min(19, (widthU - 8) / n);
-      this.spacing = spacing;
-      this.flowers = C.affirmations.map((msg, i) => ({
-        msg, i, x: (i - (n - 1) / 2) * spacing, yt: 24 + Math.round(rnd(i, 4) * 14), size: Math.min(8.5, spacing * 0.46),
-        bulge: (rnd(i, 5) - 0.5) * 5, pal: PALETTES[i % PALETTES.length], spin: rnd(i, 6) * TAU,
-        s: T0 + i * GAP_T,
-      }));
-    },
-    stemX(f, s, y, t) { return f.x + f.bulge * Math.sin(Math.PI * s) * 1 + sway(y, f.i, t); },
     frame(t) {
       backdrop(t);
-      this.build();
-      const textCols = Math.floor(this.spacing * S / ASPECT) - 2, under = textCols >= 14;
-      const wrapW = Math.min(26, textCols);
-      // stems and leaves
-      for (const f of this.flowers) {
-        const g = easeOut((t - f.s) / STEM_T);
-        if (g <= 0) continue;
-        const H0 = GROUND - f.yt, yTip = GROUND - g * H0;
-        paint(f.x - 10, yTip - 1, f.x + 10, GROUND + 1, (i, x, y) => {
-          const s = (GROUND - y) / H0;
-          if (s < 0 || s > g) return;
-          const w = 0.9 - 0.3 * s, d = Math.abs(x - this.stemX(f, s, y, t));
-          if (d < w) set(i, 0.5 + 0.3 * (1 - d / w), lerp3(STEM_COL, [0.5, 0.8, 0.45], 0.4 - d / w * 0.3));
-        });
-        [[0.3, -1], [0.5, 1]].forEach(([ls, side], li) => {
-          const gs = smoothstep(ls, ls + 0.3, g);
-          if (gs <= 0) return;
-          const py = GROUND - ls * H0, px = this.stemX(f, ls, py, t);
-          const ang = (28 + 8 * li) * Math.PI / 180, dx = side * Math.cos(ang), dy = -Math.sin(ang);
-          const a = 6.5 * gs, b = 2.1 * gs, cx = px + dx * a, cy = py + dy * a;
-          paint(cx - a - 2, cy - a - 2, cx + a + 2, cy + a + 2, (i, x, y) => {
-            const ex = x - cx, ey = y - cy, lx = ex * dx + ey * dy, ly = -ex * dy + ey * dx;
-            const q = (lx / a) ** 2 + (ly / b) ** 2;
-            if (q >= 1) return;
-            const lit = ly < 0 ? 1 : 0.55, rib = Math.abs(ly) < 0.3 * gs;
-            set(i, (0.38 + 0.3 * lit + 0.2 * (1 - q)) * (rib ? 1.2 : 1), lerp3(LEAF_D, LEAF_L, lit * 0.7 + (1 - q) * 0.3));
-          });
-        });
+      const p = PIC.bouquet, f = fitPic(p, 40, 16, 1.3), w = picW(p, f), h = p.rows * f, cx = COLS / 2, n = C.affirmations.length;
+      const ground = ROWS - 8, top = Math.max(14, Math.round(ground - 4 - h));   // the garden sits at the bottom of the screen
+      const fh = f * picX(), gw = clamp(t / 2.6, 0, 1);
+      // stems: the bundle at the bottom of the picture carries on down into the ground
+      if (!p.stem) {                                       // find where the real stems end (once)
+        const row = Math.floor(0.9 * p.rows); let lo = p.cols, hi = 0;
+        for (let x = Math.floor(p.cols * 0.3); x < p.cols * 0.7; x++) {
+          const j = (row * p.cols + x) * 4;
+          if (p.px[j + 3] > 128 && p.px[j + 1] > p.px[j] * 1.05) { lo = Math.min(lo, x); hi = Math.max(hi, x); }
+        }
+        p.stem = hi > lo ? [lo, hi] : [p.cols * 0.46, p.cols * 0.54];
       }
-      // flower heads
-      for (const f of this.flowers) {
-        const g = easeOut((t - f.s) / STEM_T);
-        if (g <= 0.05) continue;
-        const H0 = GROUND - f.yt, yTip = GROUND - g * H0, hx = this.stemX(f, g, yTip, t), hy = yTip;
-        const open = smoothstep(f.s + STEM_T + 0.2, f.s + STEM_T + 0.2 + BLOOM_T, t);
-        const R = f.size * g * (0.34 + 0.66 * easeOut(open));
-        const op = smoothstep(0.15, 0.7, open), pal = f.pal;
-        paint(hx - R - 1.5, hy - R - 2.5, hx + R + 1.5, hy + R + 1.5, (i, x, y) => {
-          const dx = x - hx, dy = y - hy, r = Math.hypot(dx, dy);
-          if (open < 0.15) {                                // closed bud
-            const q = (dx / (R * 0.62)) ** 2 + ((dy + R * 0.2) / (R * 0.95)) ** 2;
-            if (q < 1) set(i, 0.55 + 0.3 * (1 - q), lerp3([0.35, 0.7, 0.3], pal.mid, smoothstep(0.1, 0.9, (hy - y) / R * 0.5 + 0.5) * (0.4 + open * 4)));
-            return;
-          }
-          const th = Math.atan2(dy, dx) + f.spin, lobe = Math.pow(Math.abs(Math.cos(4.5 * th)), 0.65);
-          const Rp = R * (1 - 0.42 * op + 0.42 * op * lobe);
-          if (r >= Rp) return;
-          const u = r / Rp;
-          if (u < 0.24) {                                   // seed disc
-            const dot = hash3(Math.round(x * 3), Math.round(y * 3), 9) % 100 < 35;
-            set(i, dot ? 0.75 : 0.5, lerp3([0.45, 0.25, 0.08], GOLD, (1 - u / 0.24) * 0.9 + (dot ? 0.2 : 0)));
-            return;
-          }
-          let col = lerp3(pal.deep, pal.mid, smoothstep(0.2, 0.6, u));
-          col = lerp3(col, pal.tip, smoothstep(0.62, 1, u) * 0.85);
-          set(i, 0.3 + 0.28 * lobe + 0.12 * (1 - u) + (u > 0.9 ? 0.06 : 0), mul(col, 0.7 + 0.3 * lobe));
-        });
+      const sr0 = Math.round(top + 0.9 * h), sg = easeOut(clamp((t - 0.3) / 2.4));
+      for (let k = 0; k < 7; k++) {
+        const x0 = cx + (p.stem[0] + (p.stem[1] - p.stem[0]) * k / 6 - p.cols / 2) * fh;
+        for (let r = ground - Math.round(sg * (ground - sr0)); r <= ground; r++) {
+          const s2 = (r - sr0) / (ground - sr0), c = Math.round(x0 + (cx - x0) * 0.25 * s2 + 2.5 * Math.sin(s2 * 3 + k));
+          for (let d = 0; d < 3; d++) glyph(r, c + d, "|!l"[(k + r + d) % 3], 0.7 + 0.15 * (d === 1), lerp3([0.25, 0.6, 0.3], [0.6, 0.92, 0.45], (k % 3) / 3 + d * 0.25));
+        }
       }
-      // grass over the stem bases, soil underneath
-      const gr = rowAt(GROUND);
+      const shift = (nv) => wind(nv, t, 0.045 * COLS, 0.85);
+      drawPic(p, f, cx, top, (i, a, col, nu, nv, r, c) => {
+        const green = isGreen(col);                        // stems and leaves grow up from the bottom first
+        const T0 = 0.5 + (green ? (1 - nv) * 2.4 : 2.4 + 3.6 * noise2(nu, nv));   // flowers: each patch swells and opens in its own time
+        const show = smoothstep(T0, T0 + 0.5, t);
+        if (show <= 0) return;
+        const ripe = green ? 1 : smoothstep(T0 + 0.2, T0 + 2, t);
+        if (!reduce && ripe > 0.9 && col[0] + col[1] + col[2] > 2.2 && hash3(r, c, Math.floor(t * 5)) % 450 === 0) { set(i, 1, [1, 1, 0.95]); return; }   // twinkle
+        paintCell(i, a * show, ripe < 1 ? lerp3(BUD, col, ripe) : col, sweep(nu, nv, t) - 0.2 * (1 - ripe));
+      }, shift);
+      // the garden, bottom to top: layered soil, a solid mat of grass, swaying blades, and evenly spaced wildflowers
+      const soilDepth = Math.min(6, ROWS - ground - 1);
+      for (let r = ground + 1; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+        const d = r - ground, hs = hash3(r, c, 21) % 100, i = r * COLS + c;
+        if (d <= soilDepth) { if (hs < 70 - d * 5) glyph(r, c, hs % 3 === 0 ? ":" : hs % 3 === 1 ? "." : "'", (0.34 - d * 0.025) * gw, [0.6, 0.4, 0.25]); }
+        else if (hs < 3) set(i, 0.1 * gw, [0.5, 0.36, 0.24]);
+      }
       for (let c = 0; c < COLS; c++) {
-        const hgt = (1.2 + 3.4 * rnd(c, 12)) * (1 + 0.25 * FLICK * Math.sin(t * 2 + c * 0.3)), lean = Math.round(FLICK * Math.sin(t * 1.5 + c * 0.2));
-        for (let k = 0; k < hgt; k++) {
-          const f = k / hgt, r = gr - k, cc = c + Math.round(lean * f);
-          if (r < 0 || cc < 0 || cc >= COLS) continue;
-          const i = r * COLS + cc;
-          set(i, 0.42 + 0.35 * f, lerp3([0.2, 0.45, 0.25], [0.85, 0.78, 0.4], f * f));
-          fx[i] = "\"/|'`"[Math.floor(rnd(c, 13) * 5)].codePointAt(0);
-        }
-        for (let r = gr + 1; r < ROWS; r++) {
-          const i = r * COLS + c, h = hash3(r, c, 21) % 100;
-          if (h < 14) set(i, 0.1 + 0.08 * ((h % 5) / 5), [0.45, 0.32, 0.22]);
+        for (let k = 0; k < 3; k++) glyph(ground - k, c, "|!l/"[(c + k * 2) % 4], (0.5 + 0.06 * k) * gw, [0.1 + 0.03 * k, 0.4 + 0.05 * k, 0.17]);   // the mat
+        for (let layer = 0; layer < 2; layer++) {          // tall back blades, shorter front blades
+          const hgt = (layer ? 3 + 6 * rnd(c, 14) : 6 + 12 * rnd(c, 12)) * gw * (1 + 0.15 * FLICK * Math.sin(t * 2 + c * 0.3 + layer));
+          const lean = FLICK * Math.sin(t * 1.5 + c * 0.2 + layer + 0.4 * Math.sin(t * 0.7)) * 2.6;
+          for (let k = 0; k < hgt; k++) {
+            const q = k / hgt, cc = c + Math.round(lean * q * q), ch = "|/\\!l"[(c * 3 + k + layer) % 5];
+            glyph(ground - k + layer * 2, cc, ch, 0.55 + 0.3 * q, lerp3(layer ? [0.12, 0.5, 0.2] : [0.1, 0.36, 0.18], [0.75, 0.9, 0.42], q * q * (layer ? 0.9 : 1)));
+          }
         }
       }
-      // affirmations
-      this.flowers.forEach((f) => {
-        const at = f.s + STEM_T + 0.2 + BLOOM_T * 0.5, typed = Math.floor((t - at) * 24);
-        if (typed <= 0) return;
-        const cols = lerp3(f.pal.tip, CREAM, 0.35), shown = f.msg.slice(0, typed);
-        if (under) {
-          const lines = wrapPlain(f.msg, wrapW);
-          let n = 0;
-          lines.forEach((ln, li) => {
-            const part = shown.slice(n, n + ln.length + 1).slice(0, ln.length); n += ln.length + 1;
-            if (!part) return;
-            text(rowAt(GROUND + 4) + li, Math.round(cOf(f.x) - ln.length / 2), part, 0.9, cols);
-          });
-        }
-      });
-      if (!under) {                                        // narrow screens: one caption at a time
-        const live = this.flowers.filter((f) => t > f.s + STEM_T + 0.2 + BLOOM_T * 0.5).pop();
-        if (live) {
-          const typed = Math.floor((t - (live.s + STEM_T + 0.2 + BLOOM_T * 0.5)) * 24), cw = Math.min(COLS - 4, 40);
-          let n = 0;
-          wrapPlain(live.msg, cw).forEach((ln, li) => {
-            const part = live.msg.slice(n, n + ln.length).slice(0, Math.max(0, typed - n)); n += ln.length + 1;
-            if (part) textC(rowAt(GROUND + 4) + li, part.padEnd(ln.length, " ").slice(0, ln.length), 0.9, lerp3(live.pal.tip, CREAM, 0.35));
-          });
+      const FLOWER_COLS = [[0.9, 0.3, 0.5], [0.95, 0.7, 0.12], [0.6, 0.38, 0.95], [0.95, 0.38, 0.28], [0.85, 0.82, 0.9]];
+      const gap = 24, count = Math.floor(COLS / gap);
+      for (let k = 0; k < count; k++) {                    // one wildflower every ~24 columns, with a little jitter in position and height
+        const c0 = Math.round((k + 0.5) * gap + (rnd(k, 31) - 0.5) * 8), hgt = 12 + rnd(k, 32) * 8;
+        const grown = smoothstep(2.4 + (k % 7) * 0.5, 4 + (k % 7) * 0.5, t);
+        if (grown <= 0) continue;
+        const q = grown * hgt, c1 = c0 + Math.round(FLICK * Math.sin(t * 1.5 + c0 * 0.2) * 2.6 * (q / 20) * (q / 20)), row = ground - Math.round(q);
+        for (let d = 0; d < q; d++) glyph(ground - d, c0 + Math.round((c1 - c0) * (d / q) ** 2), "|", 0.6, [0.3, 0.7, 0.35]);
+        if (grown > 0.6) {
+          const bloom = FLOWER_COLS[k % FLOWER_COLS.length];
+          glyph(row, c1, "@", 0.8, [0.95, 0.75, 0.2]);
+          for (const [dr, dc] of [[-1, 0], [1, 0], [0, -2], [0, 2], [-1, -2], [-1, 2], [1, -2], [1, 2]]) glyph(row + dr, c1 + dc, "*", 0.7 * grown, bloom);
         }
       }
-      const head = "Happy birthday, " + C.name, ha = smoothstep(0.3, 1.2, t);
-      textC(rowAt(7), head, 0.95 * ha, GOLD);
+      if (!reduce) for (let k = 0; k < 40; k++) {          // petals drifting down
+        const speed = 3 + rnd(k, 2) * 3, y = top - 4 + (t * speed + rnd(k, 3) * 200) % (ground - top + 4);
+        const x = cx + (rnd(k, 1) - 0.5) * w * 1.2 + 4 * Math.sin(t * 0.9 + k);
+        glyph(Math.round(y), Math.round(x), "~*.`"[k % 4], 0.55 * smoothstep(GROW, GROW + 1.5, t), PETALS[k % PETALS.length]);
+      }
       fireflies(t, smoothstep(1, 4, t));
-      const last = this.flowers[this.flowers.length - 1];
-      const end = last.s + STEM_T + 0.2 + BLOOM_T * 0.5 + last.msg.length / 24 + 1.2;
-      if (t > end && !this.btn) { this.btn = 1; showBtn("Replay", () => goto(0)); }
+      // messages: down both sides of the bouquet on wide windows, one at a time underneath on narrow ones
+      const L = toPx(cx - w / 2, top), R = toPx(cx + w / 2, top), hpx = h * CH * L.k, room = L.x - 30;
+      let end;
+      setTitle(t > 0.3 ? "Happy birthday, " + C.name : "");
+      if (room >= 190) {
+        setCap("");
+        const rows = Math.ceil(n / 2);
+        C.affirmations.forEach((msg, k) => {
+          const el = this.notes[k], typed = Math.floor((t - (FIRST + k * EVERY)) * CPT), left = k % 2 === 0, idx = Math.floor(k / 2);
+          const y = L.y + hpx * (0.1 + (0.8 / Math.max(1, rows)) * idx + (left ? 0 : 0.1)), wd = Math.min(330, room);
+          el.style.width = wd + "px"; el.style.top = y + "px";
+          el.style.left = (left ? L.x - 24 - wd : R.x + 24) + "px";
+          if (typed > 0) typedSpans(el, msg, typed, false);
+        });
+        end = FIRST + (n - 1) * EVERY + 30 / CPT + 1.2;
+      } else {
+        const per = reduce ? 0.8 : 3, k = Math.min(n - 1, Math.max(0, Math.floor((t - FIRST) / per)));
+        ui.cap.style.bottom = "auto"; ui.cap.style.top = "13vh";   // in the empty sky, clear of the bouquet and grass
+        if (t >= FIRST) setCap(C.affirmations[k].slice(0, Math.floor((t - FIRST - k * per) * CPT)));
+        end = FIRST + n * per + 0.5;
+      }
+      if (t > end && !this.btn) { this.btn = 1; showBtn("Replay", () => goto(0), true); }
     },
   };
 
@@ -495,15 +753,21 @@
   const scenes = [countdown, cake, letter, garden];
   let cur = Number(Q.get("scene")) || 0, t0 = performance.now() - (Number(Q.get("t")) || 0) * 1000, exiting = null;
   const sceneTime = () => (performance.now() - t0) / 1000;
+  const fadeEls = [ui.cap, ui.title, ui.notes];
 
-  function showBtn(label, fn) {
+  function showBtn(label, fn, corner) {
+    btn.classList.toggle("corner", !!corner);              // corner: bottom-right, out of the way of the picture
     btn.textContent = label; btn.hidden = false;
     btn.onclick = () => { btn.hidden = true; fn(); };
     btn.focus({ preventScroll: true });
   }
   function goto(i) { if (!exiting) { btn.hidden = true; exiting = { to: i, at: performance.now() }; } }
+  function enter(i, now) {
+    clearUI(); cur = i; t0 = now;
+    useGrid(scenes[cur].grid); scenes[cur].start();
+  }
 
-  scenes[cur].start();
+  useGrid(scenes[cur].grid); scenes[cur].start();
   let lastDraw = -1e9;
   function tick(now) {
     if (now - lastDraw >= 1000 / FPS - 2) {
@@ -515,9 +779,11 @@
       if (exiting) {
         const ef = (now - exiting.at) / 450;
         fade *= 1 - clamp(ef);
-        if (ef >= 1) { cur = exiting.to; exiting = null; t0 = now; scenes[cur].start(); }
+        for (const el of fadeEls) el.style.opacity = String(1 - clamp(ef));
+        if (ef >= 1) { enter(exiting.to, now); exiting = null; for (const el of fadeEls) el.style.opacity = ""; }
       }
       if (fade < 1) for (let i = 0; i < N; i++) lum[i] *= fade;
+      curFade = fade;
       draw(Math.floor(t * FPS));
     }
     requestAnimationFrame(tick);
@@ -525,8 +791,5 @@
   requestAnimationFrame(tick);
 
   let resizeTimer = 0;
-  addEventListener("resize", () => {
-    clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(layout, 250);                 // rebuild the grid, keep the scene running
-  });
+  addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(layout, 250); });
 })();

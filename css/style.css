@@ -1,17 +1,34 @@
-:root { --night: #0b0919; --ivory: #f3ead3; --amber: #ffb347; --sky: #8fc7ff; }
-html, body { margin: 0; height: 100%; background: var(--night); overflow: hidden; }
+:root { --night: #04030a; --ivory: #f3ead3; --amber: #ffb347; --sky: #8fc7ff; --rose: #ff9fbd; }
+html, body { margin: 0; height: 100%; background: var(--night); overflow: hidden; touch-action: none; }
+body { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: var(--ivory); }
 /* The picture fills the browser window; any leftover edge stays the same night colour. */
 canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; display: block;
   object-fit: contain; background: var(--night); }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* Readable text sits on top of the canvas */
+#ui { position: fixed; inset: 0; pointer-events: none; }
+.title, .cap { position: absolute; left: 0; right: 0; text-align: center; padding: 0 1rem; box-sizing: border-box;
+  text-shadow: 0 0 10px rgba(255, 179, 71, 0.65), 0 0 24px rgba(255, 140, 42, 0.35), 0 1px 3px #000; transition: opacity 0.8s; opacity: 0; }
+.title { top: 2.2vh; font-size: clamp(1rem, 2.1vw, 1.6rem); color: #ffd48a; }
+.cap { bottom: calc(max(1.5rem, 4vh) + 4.2rem); font-size: clamp(0.95rem, 1.5vw, 1.2rem); }
+.on { opacity: 1; }
+.ghost { visibility: hidden; }
+
+.note { position: absolute; font-size: clamp(0.8rem, 1.15vw, 1.05rem); line-height: 1.45; color: #ffe9f0;
+  text-shadow: 0 0 10px rgba(255, 143, 177, 0.7); }
+.note.left { text-align: right; }
+
 button {
   position: fixed; left: 50%; bottom: max(1.5rem, 4vh); transform: translateX(-50%);
   padding: 0.75rem 1.5rem; font: 1rem ui-monospace, Menlo, Consolas, monospace; cursor: pointer;
-  color: var(--ivory); background: rgba(11, 9, 25, 0.78); border: 1px solid var(--amber); border-radius: 0.5rem;
+  color: var(--ivory); background: rgba(4, 3, 10, 0.78); border: 1px solid var(--amber); border-radius: 0.5rem;
   box-shadow: 0 0 18px rgba(255, 179, 71, 0.35); animation: rise 0.6s ease-out both;
 }
+button.corner { left: auto; right: max(1.2rem, 2.5vw); bottom: max(1.2rem, 3vh); transform: none; animation: fade 0.6s ease-out both; }
 button[hidden] { display: none; }
 button:hover { background: rgba(255, 179, 71, 0.18); }
 :focus-visible { outline: 3px solid var(--sky); outline-offset: 3px; }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes rise { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
-@media (prefers-reduced-motion: reduce) { button { animation: none; } }
+@media (prefers-reduced-motion: reduce) { button { animation: none; } .title, .cap { transition: none; } }
